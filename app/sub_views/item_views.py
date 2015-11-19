@@ -25,6 +25,8 @@ import datetime
 
 from app.series_tools import get_rating
 
+from app.sub_views import wiki_views
+
 def getSort(row):
 	chp = row.chapter if row.chapter else 0
 	vol = row.volume  if row.volume  else 0
@@ -145,6 +147,10 @@ def renderSeriesId(sid):
 		watch = False
 		watchlists = False
 
+
+
+	total_watches =       Watches.query.filter(Watches.series_id==sid).count()
+
 	if series is None:
 		flash(gettext('Series %(sid)s not found.', sid=sid))
 		return redirect(url_for('index'))
@@ -183,6 +189,7 @@ def renderSeriesId(sid):
 						most_recent   = most_recent,
 						latest_str    = latest_str,
 						series_rating = rating,
+						total_watches = total_watches,
 						)
 
 
@@ -211,7 +218,8 @@ def renderAuthorId(sid, page=1):
 						   name_key        = "title",
 						   page_url_prefix = 'series-id',
 						   searchTarget    = 'Authors',
-						   searchValue     = author.name
+						   searchValue     = author.name,
+						   wiki            = wiki_views.render_wiki("Author", author.name)
 						   )
 
 @app.route('/artist-id/<sid>/<int:page>')
@@ -239,7 +247,8 @@ def renderArtistId(sid, page=1):
 						   name_key        = "title",
 						   page_url_prefix = 'series-id',
 						   searchTarget    = 'Artists',
-						   searchValue     = artist.name
+						   searchValue     = artist.name,
+						   wiki            = wiki_views.render_wiki("Artist", artist.name)
 						   )
 
 
@@ -273,7 +282,8 @@ def renderTagId(sid, page=1):
 						   name_key        = "title",
 						   page_url_prefix = 'series-id',
 						   searchTarget    = 'Tags',
-						   searchValue     = tag.tag
+						   searchValue     = tag.tag,
+						   wiki            = wiki_views.render_wiki("Tag", tag.tag)
 						   )
 
 @app.route('/publisher-id/<sid>/<int:page>')
@@ -306,7 +316,8 @@ def renderPublisherId(sid, page=1):
 						   name_key        = "title",
 						   page_url_prefix = 'series-id',
 						   searchTarget    = 'Publishers',
-						   searchValue     = pub.name
+						   searchValue     = pub.name,
+						   wiki            = wiki_views.render_wiki("Publisher", pub.name)
 						   )
 
 
@@ -340,7 +351,8 @@ def renderGenreId(sid, page=1):
 						   name_key        = "title",
 						   page_url_prefix = 'series-id',
 						   searchTarget    = 'Genres',
-						   searchValue     = genre.genre
+						   searchValue     = genre.genre,
+						   wiki            = wiki_views.render_wiki("Genre", genre.genre)
 						   )
 
 

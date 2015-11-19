@@ -16,6 +16,28 @@
 	</div>
 {%- endmacro %}
 
+{% macro singleItemNonEditable(name, value, width=3) -%}
+	<div class="well well-tny info-item">
+		<div class="row">
+			<div class="col-md-12">
+				List Stats:
+				<span style='float:right'>
+					{% if not value: %}
+						Not on anyone's reading list.
+					{% elif value == 1: %}
+						{{value}} person follows this series.
+					{% elif value > 1: %}
+						{{value}} people follow this series.
+					{% else %}
+						Wat? (On {{value}} reading lists)
+					{% endif %}
+
+				</span>
+			</div>
+		</div>
+	</div>
+{%- endmacro %}
+
 {% macro ratingBlock(rating_value, overall_rating) -%}
 	<css>
 
@@ -312,6 +334,19 @@
 				margin-left:auto;
 			}
 
+
+		</style>
+		<div class='imgDiv' id='x'>
+			<div id='x-desc-div'>
+				<p id='x-content'>
+					<a id='editlink' href="/series-id/{{ series.id }}/edit-covers/">No covers! Add one, maybe?</a>
+				</p>
+			</div>
+		</div>
+	{% endif %}
+
+	<style>
+
 			@media (min-width: 100px) {
 				#x::after,#x::before
 				{
@@ -366,17 +401,7 @@
 			}
 
 
-
-		</style>
-		<div class='imgDiv' id='x'>
-			<div id='x-desc-div'>
-				<p id='x-content'>
-					<a id='editlink' href="/series-id/{{ series.id }}/edit-covers/">No covers! Add one, maybe?</a>
-				</p>
-			</div>
-		</div>
-	{% endif %}
-
+	</style>
 {%- endmacro %}
 
 
@@ -696,12 +721,6 @@
 			display: block;
 			clear  :both;
 		}
-		.br-theme-bars-1to10 .br-widget
-		{
-			/*height: 50px;*/
-			white-space: nowrap;
-
-		}
 		.br-theme-bars-1to10 .br-widget a
 		{
 			display: block;
@@ -772,6 +791,10 @@
 
 			{{
 				ratingBlock(1.5, 2.5)
+			}}
+
+			{{
+				singleItemNonEditable("People watching", total_watches)
 			}}
 
 			{{singleItemBlockDropbox("OEL/Translated",
