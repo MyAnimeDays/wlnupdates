@@ -1,8 +1,16 @@
+#!/bin/bash
 
-if [ "$(id -u)" != "0" ]; then
-   echo "This script must be run as root" 1>&2
+set -e
+
+if [ "$(id -u)" == "0" ]; then
+   echo "Please allow the script to `sudo` internally, it has to be done a specific"
+   echo "way to properly preserve some environment variables."
    exit 1
 fi
+if [ "$(id -u)" != "0" ]; then
+   echo "This script must be run as root. Please enter your password for sudo." 1>&2
+   sudo -H env PATH=$PATH "$0" "$@"
+fi
 
-sudo -H -u herp -- bash -c "ssh client@ks1 'sudo -u postgres pg_dump --clean -d wlndb | xz' > db_dump_$(date +%Y-%m-%d).sql.xz"
-sudo -H -u postgres -- bash -c "xz -d db_dump_$(date +%Y-%m-%d).sql.xz -c | psql -d wlndb"
+sudo -H -u herp -- bash -c "ssh client@ks1 'sudo -u postgres pg_dump --clean -d wlndb | xz' | pv -cN Db-Fetch-Progress > db_dump_$(date +%Y-%m-%d).sql.xz"
+sudo -H -u postgres -- env PATH=$PATH  bash -c "xz -d db_dump_$(date +%Y-%m-%d).sql.xz -c | pv -c | psql -d wlndb"
