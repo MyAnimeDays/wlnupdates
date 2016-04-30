@@ -254,6 +254,24 @@
 		</div>
 	</div>
 {%- endmacro %}
+{% macro dbAdminItem() -%}
+
+	<div class="well well-tny info-item">
+		<div class="row multilist" id="{{valId}}-container">
+			<div class="col-md-12 rowContents" id='{{valId}}'>
+				<form class="form-inline" action="javascript:merge_ajax();">
+
+					<div class="col-md-3 rowTitle">
+						<label style='margin-top:5px'>DB Admin View</label>
+					</div>
+					<div class="col-md-9 rowTitle">
+						<a href="/db_admin/series/edit/?id={{series_id}}&url=%2Fdb_admin%2Fseries%2F">view</a>
+					</div>
+				</form>
+			</div>
+		</div>
+	</div>
+{%- endmacro %}
 
 {% macro deleteItem() -%}
 
@@ -523,7 +541,7 @@
 						{% set links = value.split('\n') %}
 						<span class='singleitem'>
 							{% for linkurl in links %}
-								<a href='http://10.1.1.43:5001/view?url={{linkurl | urlencode}}'>R-View - {{ linkurl }}</a>{% if not loop.last %}<br>{% endif %}
+								<a href='http://10.1.1.60:5001/view?url={{linkurl | urlencode}}'>R-View - {{ linkurl }}</a>{% if not loop.last %}<br>{% endif %}
 							{% endfor %}
 						</span>
 
@@ -860,6 +878,8 @@
 							)
 			}}
 
+
+
 			{{
 				ratingBlock(1.5, 2.5)
 			}}
@@ -1036,6 +1056,13 @@
 
 			{% if g.user.is_mod() %}
 				<hr class='padded-rule'>
+
+				{{singleItemBlock("Change Title",
+									series.title,
+									'title'
+								)
+				}}
+
 				{% if g.user.id == 2 %}
 
 					{{localLinkBlock("Homepage",
@@ -1049,6 +1076,7 @@
 
 				{{mergeInto()}}
 				{{deleteItem()}}
+				{{dbAdminItem()}}
 			{% endif %}
 			<div style="clear: both;"></div>
 			<hr class='padded-rule'>

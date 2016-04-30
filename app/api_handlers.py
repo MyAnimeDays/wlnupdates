@@ -28,6 +28,7 @@ import app.series_tools
 
 VALID_KEYS = {
 	'description-container'  : 'description',
+	'title-container'        : 'title',
 	'demographic-container'  : 'demographic',
 	'type-container'         : 'type',
 	'origin_loc-container'   : 'origin_loc',
@@ -136,6 +137,24 @@ def validateMangaData(data):
 	# Return the processed output.
 	return update
 
+def updateTitle(series, newTitle):
+
+	newTitle = bleach.clean(newTitle.strip())
+
+	conflict_series = Series.query.filter(Series.title==newTitle).scalar()
+
+	if conflict_series and conflict_series.id != series.id:
+		return getResponse("A series with that name already exists! Please choose another name", error=True)
+
+
+	oldTitle = series.title
+	series.title = newTitle
+
+	ret = app.series_tools.updateAltNames(series, [newTitle, oldTitle], deleteother=False)
+	if ret:
+		return ret
+
+	return None
 
 
 def processMangaUpdateJson(data):
@@ -147,7 +166,16 @@ def processMangaUpdateJson(data):
 
 	for entry in validated['entries']:
 		# print(entry)
-		if entry['type'] == 'description':
+
+		if entry['type'] == 'title':
+			if not current_user.is_mod():
+				return getResponse(error=True, message="You have to have moderator privileges to do that!")
+
+			ret = updateTitle(series, bleach.clean(entry['data'], strip=True))
+			if ret:
+				return ret
+
+		elif entry['type'] == 'description':
 			processedData = markdown.markdown(bleach.clean(entry['data'], strip=True))
 			if series.description == processedData:
 				# print("No change?")

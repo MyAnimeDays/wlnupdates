@@ -13,6 +13,7 @@ import sqlalchemy.exc
 import bleach
 import app.series_tools
 import sqlalchemy.exc
+import Levenshtein
 # user = Users(
 # 	nickname  = form.username.data,
 # 	password  = form.password.data,
@@ -145,8 +146,43 @@ def insert_raw_item(item):
 
 	db.session.commit()
 
+
+def pick_best_match(group_rows, targetname):
+
+	gmap = {}
+
+	for group_row in group_rows:
+		name = group_row.name
+		if not name in gmap:
+			gmap[name] = []
+		gmap[name].append(group_row)
+
+	best_distance = 999
+	best = None
+	for item in group_rows:
+		dist = Levenshtein.distance(item.name, targetname)
+		if dist < best_distance:
+			if item.group_row:
+				best = item
+				best_distance = dist
+
+	print("Flushing")
+	db.session.flush()
+	assert best, "Failed to find best match for name: %s, candidates '%s'" % (targetname, [(tmp.name, tmp.id) for tmp in group_rows])
+	assert best.group_row, "Group_Row is null - Failed to find best match for name: %s, candidates '%s' row = %s:%s" % \
+			(targetname, [(tmp.name, tmp.id) for tmp in group_rows], best.id, best.group_row)
+	return best
+
 def get_create_group(groupname):
-	have = Translators.query.filter(Translators.name==groupname).scalar()
+	groupname = groupname[:500]
+	cleanName = nt.prepFilenameForMatching(groupname)
+
+	# If the group name collapses down to nothing when cleaned, search for it without cleaning.
+	if len(cleanName):
+		have = AlternateTranslatorNames.query.filter(AlternateTranslatorNames.cleanname==cleanName).all()
+	else:
+		have = AlternateTranslatorNames.query.filter(AlternateTranslatorNames.name==groupname).all()
+
 	if not have:
 		print("Need to create new translator entry for ", groupname)
 		new = Translators(
@@ -166,10 +202,23 @@ def get_create_group(groupname):
 		db.session.add(newalt)
 		db.session.commit()
 		return new
-	return have
+	else:
+
+		if len(have) == 1:
+			group = have[0]
+			assert group.group_row is not None, ("Wat? Row: '%s', '%s', '%s'" % (group.id, group.name, group.group_row))
+		elif len(have) > 1:
+			group = pick_best_match(have, groupname)
+		else:
+			raise ValueError("Wat for groupname: '%s'" % groupname)
+
+		row = group.group_row
+		return row
 
 def get_create_series(seriesname, tl_type, author_name=False):
 	# print("get_create_series(): '%s', '%s', '%s'" % (seriesname, tl_type, author_name))
+
+	tries = 0
 	while 1:
 		try:
 			have  = AlternateNames                             \
@@ -177,7 +226,8 @@ def get_create_series(seriesname, tl_type, author_name=False):
 					.filter(AlternateNames.name == seriesname) \
 					.order_by(AlternateNames.id)               \
 					.all()
-
+			# print("get_create_series for title: '%s'" % seriesname)
+			# print("Altnames matches: ", have)
 			# for item in have:
 			# 	print((item.series_row.id, item.series_row.title, [tmp.name.lower() for tmp in item.series_row.author]))
 			# print("Want:", author_name)
@@ -248,6 +298,18 @@ def get_create_series(seriesname, tl_type, author_name=False):
 				sName = seriesname
 
 
+			# We've built a new series title by appending the author/tl_type
+			# Now we need to check if that exists too.
+			if sName != seriesname:
+				haveS  = Series                              \
+						.query                              \
+						.filter(Series.title == seriesname) \
+						.limit(1)                           \
+						.scalar()
+
+				return haveS
+
+
 			print("Need to create new series entry for ", seriesname)
 			new = Series(
 					title=sName,
@@ -291,7 +353,12 @@ def get_create_series(seriesname, tl_type, author_name=False):
 			print("Concurrency issue?")
 			print("'%s', '%s', '%s'" % (seriesname, tl_type, author_name))
 			db.session.rollback()
-			raise
+
+			tries += 1
+
+			if tries > 3:
+				raise
+
 		except Exception:
 			print("Error!")
 			raise
@@ -390,7 +457,7 @@ def insert_parsed_release(item):
 	else:
 		series = get_create_series(item['series'], item["tl_type"])
 
-
+	assert group is not None
 	check_insert_release(item, group, series)
 
 def update_series_info(item):
@@ -496,26 +563,53 @@ def dispatchItem(item):
 			print("Beta release!")
 
 
+	for x in range(9999):
 
-	try:
-		if item['type'] == 'raw-feed':
-			# print("Dispatching item of type: ", item['type'])
-			insert_raw_item(item['data'])
-		elif item['type'] == 'parsed-release':
-			# print("Dispatching item of type: ", item['type'])
-			insert_parsed_release(item['data'])
-		elif item['type'] == 'series-metadata':
-			# print("Dispatching item of type: ", item['type'])
-			update_series_info(item['data'])
-		else:
-			print(item)
-			raise ValueError("No known packet structure in item!")
-	except sqlalchemy.exc.IntegrityError:
+		try:
 
-		print("ERROR INSERTING ROW!")
-		traceback.print_exc()
-		db.session.rollback()
-		return
+			db.session.flush()
+			if item['type'] == 'raw-feed':
+				# print("Dispatching item of type: ", item['type'])
+				insert_raw_item(item['data'])
+			elif item['type'] == 'parsed-release':
+				# print("Dispatching item of type: ", item['type'])
+				insert_parsed_release(item['data'])
+			elif item['type'] == 'series-metadata':
+				# print("Dispatching item of type: ", item['type'])
+				update_series_info(item['data'])
+			elif item['type'] == "system-feed-counts":
+				pass
+			elif item['type'] == "system-update-times":
+				pass
+			else:
+				print(item)
+				raise ValueError("No known packet structure in item: '%s'" % item)
+
+			return
+		except AssertionError as e:
+
+			print("ERROR INSERTING ROW (attempt %s)!" % x)
+			traceback.print_exc()
+			try:
+				db.session.rollback()
+			except Exception:
+				print("Rollback failed!")
+
+			if x > 3:
+				raise e
+
+		except sqlalchemy.exc.IntegrityError as e:
+
+			print("ERROR INSERTING ROW (attempt %s)!" % x)
+			traceback.print_exc()
+			db.session.rollback()
+
+			if x > 3:
+				raise e
+
+	print("CRITICAL:")
+	print("Failed to update item!")
+
 
 class FeedFeeder(object):
 	die = False
