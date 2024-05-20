@@ -1,6 +1,25 @@
 
-from app import db
-from app import app
+
+import markdown
+import bleach
+import os.path
+import os
+import hashlib
+import datetime
+
+from sqlalchemy import or_
+from sqlalchemy.sql import func
+import sqlalchemy.exc
+
+from data_uri import DataURI
+from flask_login import current_user
+from flask import g
+from flask import request
+
+from app.api_common import getResponse
+from app import tag_lut
+import app.utilities as autil
+import app.nameTools as nt
 from app.models import Series
 from app.models import Tags
 from app.models import Genres
@@ -13,21 +32,8 @@ from app.models import Publishers
 from app.models import Ratings
 from app.models import AlternateNames
 from app.models import AlternateTranslatorNames
-import markdown
-import bleach
-import os.path
-import os
-import hashlib
-from data_uri import DataURI
-from flask.ext.login import current_user
-import datetime
-import app.nameTools as nt
-
-from sqlalchemy import or_
-from sqlalchemy.sql import func
-
-from flask import g
-from flask import request
+from app import db
+from app import app
 
 def getCurrentUserId():
 	'''
@@ -40,13 +46,59 @@ def getCurrentUserId():
 	else:
 		return app.config['SYSTEM_USERID']
 
+
+def updateTitle(series, newTitle_raw):
+
+	newTitle = bleach.clean(newTitle_raw.strip(), tags=[], strip=True)
+
+	# Short circuit if nothing has changed.
+	if newTitle == series.title:
+		return
+
+	conflict_series = Series.query.filter(Series.title==newTitle).scalar()
+
+	if conflict_series and conflict_series.id != series.id:
+		return getResponse("A series with that name already exists! Please choose another name", error=True)
+
+
+	oldTitle          = series.title
+	series.title      = newTitle
+	series.changeuser = getCurrentUserId()
+	series.changetime = datetime.datetime.now()
+
+	ret = updateAltNames(series, [newTitle, oldTitle], deleteother=False)
+	if ret:
+		return ret
+
+	return None
+
 def updateTags(series, tags, deleteother=True, allow_new=True):
 	havetags = Tags.query.filter((Tags.series==series.id)).all()
 	havetags = {item.tag.lower() : item for item in havetags}
 
-	tags = [tag.lower().strip().replace(" ", "-") for tag in tags]
+	# Something is generating comma-separated tags. Anyways, handle that.
+	tags_out = []
+	for tag in tags:
+		if "," in tag:
+			for subtag in tag.split(","):
+				subtag = subtag.strip().strip("-")
+				tags_out.append(subtag)
+		else:
+			tags_out.append(tag)
+
+	tags = [tag.lower().strip().replace(" ", "-").replace("_", "-") for tag in tags_out]
 	tags = [bleach.clean(item, strip=True) for item in tags]
 	tags = [tag for tag in tags if tag.strip()]
+
+	# Pipe through the fixer lut
+	tags = [tag_lut.tag_fix_lut.get(tag, tag) for tag in tags]
+
+	for tag in [n for n in tags]:
+		if tag in tag_lut.tag_extend_lut:
+			tags.append(tag_lut.tag_extend_lut[tag])
+
+	tags = set(tags)
+
 	for tag in tags:
 		if tag in havetags:
 			havetags.pop(tag)
@@ -66,6 +118,9 @@ def updateTags(series, tags, deleteother=True, allow_new=True):
 	if deleteother:
 		for dummy_key, value in havetags.items():
 			db.session.delete(value)
+
+	autil.update_metadata(series)
+
 	db.session.commit()
 
 def updateGenres(series, genres, deleteother=True):
@@ -84,6 +139,9 @@ def updateGenres(series, genres, deleteother=True):
 	if deleteother:
 		for dummy_key, value in havegenres.items():
 			db.session.delete(value)
+
+	autil.update_metadata(series)
+
 	db.session.commit()
 
 def updatePublishers(series, publishers, deleteother=True):
@@ -108,27 +166,21 @@ def updatePublishers(series, publishers, deleteother=True):
 def updateAltNames(series, altnames, deleteother=True):
 	# print("Alt names:", altnames)
 	altnames = [name.strip() for name in altnames]
-	cleaned = {}
-	for name in altnames:
-		if name.lower().strip():
-			cleaned[name.lower().strip()] = name
+	altnames = [name for name in altnames if name]
+
 
 	havenames = AlternateNames.query.filter(AlternateNames.series==series.id).order_by(AlternateNames.name).all()
-	havenames = {bleach.clean(name.name.lower().strip(), strip=True) : name for name in havenames}
+	havenames = {name.name : name for name in havenames}
 
-	for name in cleaned.keys():
+	for name in altnames:
 		if name in havenames:
 			havenames.pop(name)
 		else:
-			have = AlternateNames.query.filter(AlternateNames.series==series.id).filter(or_(
-				AlternateNames.name      == cleaned[name],
-				AlternateNames.cleanname == nt.prepFilenameForMatching(cleaned[name])
-
-			)).count()
+			have = AlternateNames.query.filter(AlternateNames.series==series.id).filter(AlternateNames.name == name).count()
 			if not have:
 				newname = AlternateNames(
-						name       = cleaned[name],
-						cleanname  = nt.prepFilenameForMatching(cleaned[name]),
+						name       = name,
+						cleanname  = nt.prepFilenameForMatching(name),
 						series     = series.id,
 						changetime = datetime.datetime.now(),
 						changeuser = getCurrentUserId()
@@ -144,6 +196,9 @@ def updateAltNames(series, altnames, deleteother=True):
 
 def setAuthorIllust(series, author=None, illust=None, deleteother=True):
 	# print(("setAuthorIllust: ", series, author, illust, deleteother))
+
+	db.session.commit()
+
 	if author and illust:
 		return {'error' : True, 'message' : "How did both author and illustrator get passed here?"}
 	elif author:
@@ -156,23 +211,26 @@ def setAuthorIllust(series, author=None, illust=None, deleteother=True):
 		return {'error' : True, 'message' : "No parameters?"}
 
 	have = table.query.filter(table.series==series.id).all()
-	# print(have)
 
-	haveitems = {item.name.lower().strip() : item for item in have}
-	initems   = {    value.lower().strip() : value for value in values}
-
+	haveitems = {bleach.clean(item.name.lower().strip()) : item  for item  in have  }
+	initems   = {bleach.clean(    value.lower().strip()) : value for value in values}
 
 	for name in initems.keys():
 		if name in haveitems:
 			haveitems.pop(name)
 		else:
-			newentry = table(
-					series     = series.id,
-					name       = bleach.clean(initems[name], strip=True),
-					changetime = datetime.datetime.now(),
-					changeuser = getCurrentUserId()
-				)
-			db.session.add(newentry)
+			try:
+				newentry = table(
+						series     = series.id,
+						name       = bleach.clean(initems[name], strip=True),
+						changetime = datetime.datetime.now(),
+						changeuser = getCurrentUserId()
+					)
+				db.session.add(newentry)
+				db.session.commit()
+			except sqlalchemy.exc.IntegrityError:
+				db.session.rollback()
+				print("Error adding name: %s (%s)" % (name, initems[name]))
 
 	if deleteother:
 		for key, value in haveitems.items():
@@ -274,42 +332,82 @@ def get_identifier():
 			return None, request.remote_addr
 
 
+# def ci_lower_bound(pos, n)
+# 	confidence = 1.96
+# 	if n == 0
+# 		return 0
+# 	end
+# 	z = Statistics2.pnormaldist(1-(1-confidence)/2)
+# 	phat = 1.0*pos/n
+# 	(phat + z*z/(2*n) - z * Math.sqrt((phat*(1-phat)+z*z/(4*n))/n))/(1+z*z/n)
 
-def set_rating(sid, new_rating):
-	uid, ip = get_identifier()
-	print("Set-rating call for sid %s, uid %s, ip %s. Rating: %s" % (sid, uid, ip, new_rating))
-	user_rtng = Ratings.query \
+def set_rating(sid, new_rating=None):
+
+	if new_rating:
+		uid, ip = get_identifier()
+		print("Set-rating call for sid %s, uid %s, ip %s. Rating: %s" % (sid, uid, ip, new_rating))
+		user_rtng = Ratings.query \
+			.filter(Ratings.series_id == sid) \
+			.filter(Ratings.user_id   == uid) \
+			.filter(Ratings.source_ip == ip ) \
+			.scalar()
+
+		if user_rtng:
+			user_rtng.rating = new_rating
+		else:
+			new_row = Ratings(
+					rating    = new_rating,
+					series_id = sid,
+					user_id   = uid,
+					source_ip = ip,
+				)
+			db.session.add(new_row)
+
+		db.session.commit()
+
+	# Now update the series row.
+	s_ratings = Ratings.query \
 		.filter(Ratings.series_id == sid) \
-		.filter(Ratings.user_id   == uid) \
-		.filter(Ratings.source_ip == ip ) \
-		.scalar()
+		.all()
 
-
-	if user_rtng:
-		user_rtng.rating = new_rating
+	if s_ratings:
+		ratings = [tmp.rating for tmp in s_ratings]
+		newval  = sum(ratings) / len(ratings)
+		rcnt    = len(ratings)
 	else:
-		new_row = Ratings(
-				rating    = new_rating,
-				series_id = sid,
-				user_id   = uid,
-				source_ip = ip,
-			)
-		db.session.add(new_row)
+		newval = None
+		rcnt   = None
+
+	Series.query \
+		.filter(Series.id == sid) \
+		.update({'rating' : newval, 'rating_count' : rcnt})
 
 	db.session.commit()
 
-
 def get_rating(sid):
 	uid, ip = get_identifier()
-	# print("Get-rating call for sid %s, uid %s, ip %s." % (sid, uid, ip))
 	user_rtng = Ratings.query \
 		.filter(Ratings.series_id == sid) \
 		.filter(Ratings.user_id   == uid) \
 		.filter(Ratings.source_ip == ip ) \
-		.scalar()
+		.all()
 
+	if len(user_rtng) == 1:
+		user_rtng = user_rtng[0]
 
-	avg, count = db.session.query(func.avg(Ratings.rating).label('average'), func.count(Ratings.rating).label('count')).filter(Ratings.series_id == sid).one()
+	elif len(user_rtng) >  1:
+		# If we have more then one rating (how did that happen?)
+		# just delete everything
+		for row in user_rtng:
+			db.session.delete(row)
+		db.session.commit()
+		user_rtng = None
+	else:
+		user_rtng = None
+
+	# Funky tuple unpacking
+	avg,   = db.session.query(Series.rating).filter(Series.id == sid).one()
+	count, = db.session.query(func.count(Ratings.rating)).filter(Ratings.series_id == sid).one()
 	user_rtng = -1 if user_rtng == None else user_rtng.rating
 
 	# print("Rating - Average: %s from %s ratings, user-rating: %s" % (avg, count, user_rtng))

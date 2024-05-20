@@ -1,11 +1,15 @@
+
+from jinja2.filters import do_urlencode
 from flask import render_template
 from flask import flash
 from flask import redirect
 from flask import url_for
 from flask import g
-from flask.ext.babel import gettext
+from flask_babel import gettext
+import werkzeug.exceptions
 # from guess_language import guess_language
 from app import app
+from app import db
 
 from app.models import Series
 from app.models import Tags
@@ -19,18 +23,27 @@ from app.models import Publishers
 from app.models import Watches
 
 from sqlalchemy import desc
-from natsort import natsort_keygen
+from sqlalchemy import select
+from sqlalchemy import and_
 from sqlalchemy.orm import joinedload
+from sqlalchemy import func
 import datetime
+from natsort import natsort_keygen
+
+from slugify import slugify
 
 from app.series_tools import get_rating
 
 from app.sub_views import wiki_views
 
-def getSort(row):
-	chp = row.chapter if row.chapter else 0
-	vol = row.volume  if row.volume  else 0
-	return vol * 1e6 + chp
+def getChapterSort(row):
+	chp = row.chapter   if row.chapter else 0
+	vol = row.volume    if row.volume  else 0
+	frg = row.fragment  if row.fragment  else 0
+	return (vol * 1e6) + chp + (frg * 1e-6)
+
+def getDateSort(row):
+	return row.published
 
 def build_progress(watch):
 
@@ -40,38 +53,42 @@ def build_progress(watch):
 	progress['frg'] = 0
 
 	if watch:
-		raw_vol = watch.volume  if watch.volume  != None else 0
-		raw_chp = watch.chapter if watch.chapter != None else 0
-		progress['vol'] = raw_vol
-		progress['chp'] = int(raw_chp)
-		progress['frg'] = int(raw_chp * 100) % 100
+		raw_vol = watch.volume   if watch.volume   != None else 0
+		raw_chp = watch.chapter  if watch.chapter  != None else 0
+		raw_frg = watch.fragment if watch.fragment != None else 0
+		progress['vol'] = float(raw_vol)
+		progress['chp'] = float(raw_chp)
+		progress['frg'] = float(raw_frg)
 
 
 	progress['vol'] = max(progress['vol'], 0)
 	progress['chp'] = max(progress['chp'], 0)
 	progress['frg'] = max(progress['frg'], 0)
-
 	return progress
 
 def get_latest_release(releases):
-	max_vol = 0
-	max_chp = 0
-	max_release = None
-	for release in [item for item in releases if item.include]:
 
-		if release.volume and release.volume > max_vol:
-			max_vol = release.volume
-			max_chp = release.chapter
-			max_release = release
-		elif release.volume and release.chapter and release.volume >= max_vol and release.chapter >= max_chp:
-			max_vol = release.volume
-			max_chp = release.chapter
-			max_release = release
+	if not releases:
+		return None
 
-		elif not release.volume and not max_vol and release.chapter and release.chapter >= max_chp:
-			max_chp = release.chapter
-			max_release = release
-	return max_release
+	releases = [(
+			release.volume   if release.volume   is not None else -1,
+			release.chapter  if release.chapter  is not None else -1,
+			release.fragment if release.fragment is not None else -1,
+			release.id,  # row id is guaranteed unique, and should prevent the sort from ever reaching the release item
+			release
+			) for release in releases if release.include]
+	releases.sort()
+
+	if not releases:
+		return None
+	if not releases[-1]:
+		return None
+
+	latest = releases[-1][-1]
+
+
+	return latest
 
 def get_most_recent_release(releases):
 	max_release = datetime.datetime.min
@@ -83,8 +100,9 @@ def get_most_recent_release(releases):
 def format_latest_release(release):
 	if release == None:
 		return "none"
-	vol = release.volume
-	chp = release.chapter
+	vol  = release.volume
+	chp  = release.chapter
+	frag = release.fragment
 
 	if vol == None:
 		vol = -1
@@ -96,12 +114,68 @@ def format_latest_release(release):
 		if len(ret) > 1:
 			ret += ", "
 		ret += "ch. {}".format(chp)
+	if frag:
+		ret += " pt. {}".format(frag)
 	return ret
 
 def get_cover_sorter():
 	# Munge up the covers so they sort properly
 	sorter = natsort_keygen(key=lambda x: str(x.description).replace('〈', '').replace('〉', ''))
 	return sorter
+
+def get_similar_by_tags(sid, taglist):
+	'''
+	Example query:
+		SELECT p.*
+		    FROM series p
+		WHERE p.id IN (
+		    SELECT
+		        tg.series, COUNT(DISTINCT tg.tag)
+		    FROM tags tg
+		    WHERE tg.tag IN (
+		        'world-travel',
+		        'rape',
+		        'popular-male-lead',
+		        'politics-involving-royalty',
+		        'parallel-dimension',
+		        'otaku',
+		        'older-female-younger-male',
+		        'military',
+		        'magic')
+		    GROUP BY tg.series
+		    ORDER BY
+		        COUNT(DISTINCT tg.tag) DESC
+		    LIMIT 10
+		);
+	'''
+
+	count_metric = func.count(func.distinct(Tags.tag))
+	query = select(
+			[Series.title, Series.id],
+			from_obj=[Series]
+			).where(
+				Series.id.in_(
+					select(
+						[Tags.series],
+						from_obj=[Tags],
+						order_by=desc(count_metric)
+					).group_by(
+						Tags.series
+					).where(
+						and_(
+							Tags.tag.in_([tag.tag for tag in taglist[:100]]),
+							Tags.series != sid
+							)
+					).limit(
+						6
+					)
+				)
+			)
+
+
+	results = db.session.execute(query).fetchall()
+	return results
+
 
 
 def load_series_data(sid):
@@ -118,7 +192,8 @@ def load_series_data(sid):
 	series = series.options(joinedload('author'))
 	series = series.options(joinedload('alternatenames'))
 	series = series.options(joinedload('illustrators'))
-	series = series.options(joinedload('releases.translators'))
+	series = series.options(joinedload('tags'))
+	# series = series.options(joinedload('releases.translators'))
 
 	series = series.filter(Series.id==sid)
 
@@ -154,7 +229,10 @@ def load_series_data(sid):
 		return None
 
 	releases = series.releases
-	releases.sort(reverse=True, key=getSort)
+	if series.sort_mode == 'chronological_order':
+		releases.sort(reverse=True, key=getDateSort)
+	else:
+		releases.sort(reverse=True, key=getChapterSort)
 
 
 	latest      = get_latest_release(releases)
@@ -171,7 +249,13 @@ def load_series_data(sid):
 
 	rating = get_rating(sid)
 
-	return series, releases, watch, watchlists, progress, latest, latest_dict, most_recent, latest_str, rating, total_watches
+	if series.tags:
+		similar_series = get_similar_by_tags(sid, series.tags)
+	else:
+		similar_series = []
+
+
+	return series, releases, watch, watchlists, progress, latest, latest_dict, most_recent, latest_str, rating, total_watches, similar_series
 
 def get_author(sid):
 	author = Author.query.filter(Author.id==sid).first()
@@ -252,31 +336,158 @@ def get_genre_id(sid, page=1):
 	return genre, series
 
 @app.route('/series-id/<sid>/')
-def renderSeriesId(sid):
+def renderSeriesIdWithoutSlug(sid):
+
+	series       =       Series.query
+	series = series.filter(Series.id==sid)
+	series = series.first()
+	if series is None:
+		flash(gettext('Series %(sid)s not found.', sid=sid))
+		return redirect(url_for('index'))
+
+	return redirect(url_for("renderSeriesId", sid=sid, slug=slugify(series.title, to_lower=True)))
 
 
+
+@app.route('/series-id-unread/<sid>/')
+def renderLatestUnreadForSeriesId(sid):
+
+	series       = Series.query
+	series       = series.options(joinedload('releases'))
+	series       = series.filter(Series.id==sid)
+	series       = series.first()
+
+	if series is None:
+		flash(gettext('Series %(sid)s not found.', sid=sid))
+		return redirect(url_for('index'))
+
+	if not g.user.is_authenticated():
+		flash(gettext('You need to be logged in so the system can track your latest read chapter in order for '
+					+ 'unread shortcut links to be functional.'))
+		return redirect(url_for("renderSeriesId", sid=sid, slug=slugify(series.title, to_lower=True)))
+
+
+	watch      =       Watches.query.filter(Watches.series_id==sid)     \
+	                                  .filter(Watches.user_id==g.user.id) \
+	                                  .scalar()
+
+	if not watch:
+		flash(gettext('You need to be watching a series in so the system can track your latest read chapter to '
+					+ 'make unread shortcut links functional.'))
+		return redirect(url_for("renderSeriesId", sid=sid, slug=slugify(series.title, to_lower=True)))
+
+	if series.sort_mode == "chronological_order":
+		# In chronological order mode, we just sort by date only
+		# TODO: Push sorting down to the DB query
+		releases = [
+		                (
+		                    tmp.published,
+		                    idx,
+		                    tmp
+		                 )
+		             for
+		                 idx, tmp
+		             in
+		                 enumerate(series.releases, 1)
+		             if
+		                 tmp.include
+		            ]
+		releases.sort()
+
+		# Renumber with the correct sequential numbering.
+		releases = [(tmp[0], idx, tmp[2]) for idx, tmp in enumerate(releases, 1)]
+
+	else:   # only parsed_title_order at the moment.
+		# we insert a incrementing count to prevent the possiblity of trying to order by
+		# a Release item, since they're explicitly not orderable. Since `idx` will never be
+		# the same, we can gaurantee we'll never hit the last item in the list
+		releases = [
+		                (
+		                    tmp.volume   if tmp.volume   else 0,
+		                    tmp.chapter  if tmp.chapter  else 0,
+		                    tmp.fragment if tmp.fragment else 0,
+		                    tmp.published,
+		                    idx,
+		                    tmp
+		                 )
+		             for
+		                 idx, tmp
+		             in
+		                 enumerate(series.releases, 1)
+		             if
+		                 tmp.include
+		            ]
+
+		releases.sort()
+
+	# Watch read-to value
+	wv, wc, wf = watch.volume if watch.volume else 0, watch.chapter if watch.chapter else 0, watch.fragment if watch.fragment else 0
+	# Handle special-case negagtive read values used to mask off values
+	wv, wc, wf = max(0, wv), max(0, wc), max(0, wf)
+
+	# print("Read progress:", (wv, wc, wf))
+	# for release in releases:
+	# 	print(release)
+
+	for item in releases:
+		rel = item[-1]
+		idx = item[-2]
+
+		# Release value
+		rv, rc, rf = rel.volume   if rel.volume   else 0, rel.chapter   if rel.chapter   else 0, rel.fragment   if rel.fragment   else 0
+
+
+		# # Clobber the chapter value in chrono mode.
+		# if series.sort_mode == "chronological_order":
+		# 	rc = idx
+
+		# print("Item:", item)
+		if (rv >= wv and rc >= wc and rf > wf) or (rv >= wv and rc > wc) or (rv > wv):
+			if g.user.id == 2:
+				return redirect('http://10.1.1.60:5001/view?url=%s' % do_urlencode(rel.srcurl))
+
+			return redirect(rel.srcurl)
+
+
+
+	flash(gettext('Could not determine what chapter to redirect you too. Sorry about that!'))
+
+	return redirect(url_for("renderSeriesId", sid=sid, slug=slugify(series.title, to_lower=True)))
+
+
+
+@app.route('/series-id/<sid>/<slug>')
+def renderSeriesId(sid, slug):
 
 	data = load_series_data(sid)
 	if data is None:
 		flash(gettext('Series %(sid)s not found.', sid=sid))
 		return redirect(url_for('index'))
 
-	series, releases, watch, watchlists, progress, latest, latest_dict, most_recent, latest_str, rating, total_watches = data
+	series, releases, watch, watchlists, progress, latest, latest_dict, most_recent, latest_str, rating, total_watches, similar_series = data
 
+	# Check we're at the right slug url
+	if slug != slugify(series.title, to_lower=True):
+		return redirect(url_for("renderSeriesId", sid=sid, slug=slugify(series.title, to_lower=True)))
+
+	if series.orig_status and "&lt;br&gt;" in series.orig_status:
+		series.orig_status = series.orig_status.replace("&lt;br&gt;", ", ")
+		db.session.commit()
 
 	return render_template('series-id.html',
-						series_id     = sid,
-						series        = series,
-						releases      = releases,
-						watch         = watch,
-						watchlists    = watchlists,
-						progress      = progress,
-						latest        = latest,
-						latest_dict   = latest_dict,
-						most_recent   = most_recent,
-						latest_str    = latest_str,
-						series_rating = rating,
-						total_watches = total_watches,
+						series_id      = sid,
+						series         = series,
+						releases       = releases,
+						watch          = watch,
+						watchlists     = watchlists,
+						progress       = progress,
+						latest         = latest,
+						latest_dict    = latest_dict,
+						most_recent    = most_recent,
+						latest_str     = latest_str,
+						series_rating  = rating,
+						total_watches  = total_watches,
+						similar_series = similar_series,
 						)
 
 
@@ -419,15 +630,12 @@ def renderGenreId(sid, page=1):
 # 						   )
 
 
-@app.route('/group-id/<sid>/<int:page>')
-@app.route('/group-id/<sid>/')
-def renderGroupId(sid, page=1):
+def get_group_id(sid, page):
 
 	group = Translators.query.filter(Translators.id==sid).scalar()
-
 	if group is None:
-		flash(gettext('Group/Translator not found? This is probably a error!'))
-		return redirect(url_for('renderGroupsTable'))
+		return None, None, None, None, None
+
 
 	names = [tmp.name for tmp in group.alt_names]
 
@@ -435,21 +643,43 @@ def renderGroupId(sid, page=1):
 		.filter(Feeds.srcname.in_(names))            \
 		.order_by(desc(Feeds.published))
 
+	items_raw = Releases.query.filter(Releases.tlgroup==group.id).order_by(desc(Releases.published))
 
-	items = Releases.query.filter(Releases.tlgroup==group.id).order_by(desc(Releases.published)).all()
-	feed_entries = feeds.paginate(page, app.config['SERIES_PER_PAGE'])
 
-	ids = []
-	for item in items:
-		ids.append(item.series)
+	subq = Releases.query.with_entities(Releases.series.distinct()).filter(Releases.tlgroup==group.id)
 
-	series = Series.query.filter(Series.id.in_(ids)).order_by(Series.title).all()
+	seriesq = Series.query.filter(Series.id.in_(subq)).order_by(Series.title)
+
+	series = seriesq.all()
+
+	return group, names, feeds, items_raw, series
+
+@app.route('/group-id/<sid>/<int:page>')
+@app.route('/group-id/<sid>/')
+def renderGroupId(sid, page=1):
+
+	group, names, feeds, items_raw, series = get_group_id(sid, page)
+
+
+	if group is None:
+		flash(gettext('Group/Translator not found? This is probably a error!'))
+		return redirect(url_for('renderGroupsTable'))
+
+	try:
+		feed_entries = feeds.paginate(page, app.config['SERIES_PER_PAGE'])
+	except werkzeug.exceptions.NotFound:
+		feed_entries = None
+	try:
+		items = items_raw.paginate(page, app.config['SERIES_PER_PAGE'])
+	except werkzeug.exceptions.NotFound:
+		items = None
+
 
 	return render_template('group.html',
-						   series        = series,
-						   releases      = items,
-						   sequence_item = feed_entries,
-						   group         = group,
-						   wiki          = wiki_views.render_wiki("Group", group.name)
+						   series                 = series,
+						   releases_sequence_item = items,
+						   feed_sequence_item     = feed_entries,
+						   group                  = group,
+						   wiki                   = wiki_views.render_wiki("Group", group.name)
 						   )
 

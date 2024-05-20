@@ -1,4 +1,10 @@
 
+import pprint
+import json
+import itertools
+import urllib.parse
+import tqdm
+
 from app import db
 from app import app
 from app.models import AlternateNames
@@ -30,17 +36,90 @@ from app.models import PublishersChanges
 from sqlalchemy import or_
 
 from flask import flash
-from flask.ext.babel import gettext
-from flask.ext.login import current_user
+from flask_babel import gettext
+from flask_login import current_user
 
-from flask.ext.login import current_user
+from flask_login import current_user
 import app.series_tools
 from app.api_common import getResponse
 
 import FeedFeeder.FeedFeeder
+import sqlalchemy.exc
+
+
+import util.text_tools as text_tools
 
 import app.api_handlers
 
+
+def setSortOrder(data):
+	if not current_user.is_mod():
+		return getResponse(error=True, message="You have to have moderator privileges to do that!")
+
+	# Json request: {'item-id': '32606', 'mode': 'set-sort-mode', 'sort-mode': 'chronological_order'}
+	assert data['mode'] == 'set-sort-mode'
+	assert 'item-id' in data
+	assert 'sort-mode' in data
+	mid = int(data['item-id'])
+	mode = data['sort-mode']
+
+
+	assert mode in ['chronological_order', 'parsed_title_order']
+	itm = Series.query.filter(Series.id==mid).one()
+
+	print(itm.sort_mode)
+	print(itm)
+
+	itm.sort_mode = mode
+
+	db.session.commit()
+
+	return getResponse("Success", False)
+
+	# return getResponse(error=True, message="lolwut!")
+
+def get_config_json():
+	val = {}
+	try:
+		ret = json.load(open("volatile_config.json"))
+		if isinstance(ret, dict):
+			val = ret
+	except FileNotFoundError:
+		val = {}
+	except json.JSONDecodeError:
+		val = {}
+
+	val.setdefault("no-merge-series", [])
+	val.setdefault("no-merge-groups", [])
+	val.setdefault("delete-tags", [])
+	return val
+
+
+def save_config_json(newdat):
+	with open("volatile_config.json", "w") as fp:
+		json.dump(newdat, fp, indent="	")
+
+def preventMergeSeriesItems(data):
+	if not current_user.is_mod():
+		return getResponse(error=True, message="You have to have moderator privileges to do that!")
+
+
+	assert 'mode' in data
+	assert data['mode'] == 'block-merge-id'
+	assert 'item-id' in data
+	assert 'separate_id' in data
+
+	m1, m2 = int(data['item-id']), int(data['separate_id'])
+
+	m1, m2 = min(m1, m2), max(m1, m2)
+	have = get_config_json()
+
+
+	if not [m1, m2] in have['no-merge-series']:
+		have['no-merge-series'].append([m1, m2])
+	save_config_json(have)
+
+	return getResponse("Success", False)
 
 def mergeSeriesItems(data):
 	if not current_user.is_mod():
@@ -54,6 +133,44 @@ def mergeSeriesItems(data):
 
 	m1, m2 = int(data['item-id']), int(data['merge_id'])
 	return merge_series_ids(m1, m2)
+
+
+
+def preventMergeGroupEntries(data):
+	if not current_user.is_mod():
+		return getResponse(error=True, message="You have to have moderator privileges to do that!")
+
+
+	assert 'mode' in data
+	assert data['mode'] == 'block-group-merge-id'
+	assert 'item-id' in data
+	assert 'separate_id' in data
+
+	m1, m2 = int(data['item-id']), int(data['separate_id'])
+
+	m1, m2 = min(m1, m2), max(m1, m2)
+	have = get_config_json()
+
+
+	if not [m1, m2] in have['no-merge-groups']:
+		have['no-merge-groups'].append([m1, m2])
+	save_config_json(have)
+
+	return getResponse("Success", False)
+
+def mergeGroupEntries(data):
+	if not current_user.is_mod():
+		return getResponse(error=True, message="You have to have moderator privileges to do that!")
+
+
+	assert 'mode' in data
+	assert data['mode'] == 'do-group-merge-id'
+	assert 'item-id' in data
+	assert 'merge_id' in data
+
+	m1, m2 = int(data['item-id']), int(data['merge_id'])
+	return merge_tl_group_ids(m1, m2)
+
 
 def mergeGroupItems(data):
 	if not current_user.is_mod():
@@ -190,25 +307,27 @@ def merge_series_ids(m1, m2):
 		itm_to.demographic = itm_from.demographic
 	if itm_from.orig_lang and not itm_to.orig_lang:
 		itm_to.orig_lang = itm_from.orig_lang
-	if not itm_to.volume or (itm_from.volume and itm_from.volume > itm_to.volume):
-		itm_to.volume = itm_from.volume
-	if not itm_to.chapter or (itm_from.chapter and itm_from.chapter > itm_to.chapter):
-		itm_to.chapter = itm_from.chapter
 	if itm_from.region and not itm_to.region:
 		itm_to.region = itm_from.region
-	if not itm_to.tot_chapter or (itm_from.tot_chapter and itm_from.tot_chapter > itm_to.tot_chapter):
-		itm_to.tot_chapter = itm_from.tot_chapter
-	if not itm_to.tot_volume or (itm_from.tot_volume and itm_from.tot_volume > itm_to.tot_volume):
-		itm_to.tot_volume = itm_from.tot_volume
 	if itm_from.license_en and not itm_to.license_en:
 		itm_to.license_en = itm_from.license_en
 	if itm_from.orig_status and not itm_to.orig_status:
 		itm_to.orig_status = itm_from.orig_status
 
-	if itm_from.website and not itm_to.website:
-		itm_to.website = itm_from.website
 	if itm_from.pub_date and not itm_to.pub_date:
 		itm_to.pub_date = itm_from.pub_date
+
+
+	if itm_from.website and not itm_to.website:
+		itm_to.website = itm_from.website.lower()
+
+	# Merge item links
+	elif itm_from.website and itm_to.website:
+		websites = list(set(itm_from.website.split("\n") + itm_to.website.split("\n")))
+		websites.sort()
+		websites = "\n".join(websites)
+		itm_to.website = websites
+
 
 	db.session.flush()
 	sid = itm_from.id
@@ -225,6 +344,8 @@ def merge_series_ids(m1, m2):
 
 	db.session.commit()
 
+	app.series_tools.set_rating(sid, new_rating=None)
+
 	return getResponse("Success", False)
 
 def getReleaseFromId(inId):
@@ -234,6 +355,9 @@ def getReleaseFromId(inId):
 def toggle_counted(data):
 	release = getReleaseFromId(data['id'])
 	release.include = not release.include
+
+	app.utilities.update_latest_row(release.series_row)
+
 	db.session.commit()
 
 	flash(gettext('Release %(id)s count-state toggled. New state: %(state)s', id=release.id, state="counted" if release.include else "uncounted"))
@@ -282,8 +406,238 @@ def alterReleaseItem(data):
 
 
 
-def flatten_series_by_url(data):
-	if not current_user.is_mod():
+def clean_bad_releases(data, admin_override=False):
+	badurls = [
+		"https://www.novelupdates.com/",
+	]
+
+	bad = 0
+	for badurl in badurls:
+		matches = Releases.query.filter(Releases.srcurl==badurl).all()
+		if matches:
+			for match in matches:
+				bad += 1
+				db.session.delete(match)
+			db.session.commit()
+	print("Deleted %s items." % bad)
+
+
+
+def _consolidate_rrl_items():
+
+	dups = db.engine.execute('''
+		SELECT
+			id, website
+		FROM
+			series
+		WHERE
+			website IS NOT NULL AND website != ''
+		;''')
+
+	match_num = 0
+	paths = {}
+
+	dups = list(dups)
+
+	print("Found %s rows with non-null URLs" % (len(dups), ))
+	for idno, website in dups:
+		if not ("royalroadl.com" in website.lower() or "royalroad.com" in website.lower()):
+			continue
+
+
+		parsed = urllib.parse.urlsplit(website)
+		if not parsed.path in paths:
+			paths[parsed.path] = []
+		paths[parsed.path].append((idno, website, parsed))
+
+		# matches = Series.query.filter(Series.website==website).all()
+		# ids = [match.id for match in matches]
+		# zipped = list(zip(ids, ids[1:]))
+		# for m1, m2 in zipped:
+		# 	match_num += 1
+		# 	merge_series_ids(m1, m2)
+
+	long = []
+	for key in paths.keys():
+		if len(paths[key]) > 1:
+			long.append(paths[key])
+
+
+	for item in long:
+		# if not all([(tmp[2].netloc == 'royalroadl.com' or tmp[2].netloc == 'www.royalroadl.com') for tmp in item]):
+		if not all((
+				all([item[0][2].path   == tmp[2].path for tmp in item]),
+				all([item[0][2].query  == tmp[2].query for tmp in item]),
+				all([(tmp[2].netloc == 'royalroadl.com' or tmp[2].netloc == 'www.royalroadl.com' or tmp[2].netloc == 'royalroad.com' or tmp[2].netloc == 'www.royalroad.com') for tmp in item]),
+			)):
+			print("Wat?")
+			print([item[0][2].path   == tmp[2].path for tmp in item])
+			print([item[0][2].query  == tmp[2].query for tmp in item])
+			print([(tmp[2].netloc == 'royalroadl.com' or tmp[2].netloc == 'www.royalroadl.com' or tmp[2].netloc == 'royalroad.com' or tmp[2].netloc == 'www.royalroad.com') for tmp in item])
+			print(item)
+			assert True == False
+		# if not all((
+		# 		all([item[0][2].scheme == tmp[2].scheme for tmp in item]),
+		# 		all([item[0][2].path   == tmp[2].path for tmp in item]),
+		# 		all([item[0][2].query  == tmp[2].query for tmp in item]),
+		# 		all([(tmp[2].netloc == 'royalroadl.com' or tmp[2].netloc == 'www.royalroadl.com') for tmp in item]),
+		# 	)):
+		# 	print("Wut: ", item)
+		# 	print("	", all([tmp[2].scheme for tmp in item]))
+		# 	print("	", all([tmp[2].path for tmp in item]))
+		# 	print("	", all([tmp[2].query for tmp in item]))
+		# 	print("	", all([(tmp[2].netloc == 'royalroadl.com' or tmp[2].netloc == 'www.royalroadl.com') for tmp in item]))
+		# for sub in item:
+		# 	print("	", sub[2])
+		print("Need to merge: ", [tmp[0] for tmp in item])
+
+
+		match_num += 1
+		print("merging:", item[0][0], item[1][0])
+		merge_series_ids(item[0][0], item[1][0])
+		db.session.commit()
+
+	print("Merged: ", match_num)
+	return match_num
+
+
+def consolidate_rrl_items(data, admin_override=False):
+	if admin_override is False and (not current_user.is_mod()):
+		return getResponse(error=True, message="You have to have moderator privileges to do that!")
+
+	# We repeatedly execute the merge until it no longer results in any changes.
+	match_num = 0
+	merged = _consolidate_rrl_items()
+	while merged:
+		match_num += merged
+		merged = _consolidate_rrl_items()
+
+	return getResponse("%s Items merged." % match_num, error=False)
+
+def dump_results(res_list):
+	for row in res_list:
+		print("	https://www.wlnupdates.com/series-id/%s/ , %s" % (row.series, (
+					row.volume, row.chapter, row.fragment, row.postfix
+				)
+			))
+
+	pass
+
+class MatchTracker():
+	def __init__(self):
+		self.map = {}
+
+	def add_match(self, s1, s2):
+
+		assert isinstance(s1, int)
+		assert isinstance(s2, int)
+
+		if s1 == s2:
+			return
+
+		s1, s2 = min((s1, s2)), max((s1, s2))
+		self.map.setdefault((s1, s2), 0)
+		self.map[(s1, s2)] += 1
+
+def pairwise(iterable):
+	"s -> (s0,s1), (s1,s2), (s2, s3), ..."
+	a, b = itertools.tee(iterable)
+	next(b, None)
+	return zip(a, b)
+
+def _update_consolidate_release(mt, from_url, new_url):
+	old = Releases.query.filter(Releases.srcurl == from_url).all()
+	new = Releases.query.filter(Releases.srcurl == new_url).all()
+
+	if not old:
+		print("What?", from_url, new_url)
+		return
+
+	if len(old) > 1:
+		# print("Multiple old results: ", from_url)
+		# dump_results(old)
+		map(mt.add_match, pairwise([tmp.series for tmp in old]))
+		if new:
+			map(mt.add_match, pairwise([tmp.series for tmp in old+new]))
+			map(mt.add_match, pairwise([tmp.series for tmp in new+old]))
+		return
+	if len(new) > 1:
+		# print("Multiple new results: ", new_url)
+		# dump_results(new)
+		map(mt.add_match, pairwise([tmp.series for tmp in new]))
+		if old:
+			map(mt.add_match, pairwise([tmp.series for tmp in old+new]))
+			map(mt.add_match, pairwise([tmp.series for tmp in new+old]))
+		return
+
+	if old:
+		old, = old
+	if new:
+		new, = new
+
+	if old and not new:
+		old.srcurl = new_url
+		db.session.commit()
+		return
+
+	if old and new:
+		if old.series == new.series:
+			db.session.delete(old)
+			db.session.commit()
+			return
+
+
+		mt.add_match(old.series, new.series)
+		# print("Series mismatch! https://www.wlnupdates.com/series-id/%s , https://www.wlnupdates.com/series-id/%s" % (old.series, new.series))
+
+
+
+def consolidate_rrl_releases(data, admin_override=False):
+	if admin_override is False and (not current_user.is_mod()):
+		return getResponse(error=True, message="You have to have moderator privileges to do that!")
+
+	rrl = Translators.query.filter(Translators.name == "RoyalRoadL").scalar()
+
+	print("RRL TL Group")
+	print(rrl)
+
+	mt = MatchTracker()
+
+	print("Total releases:")
+	print(Releases.query.filter(Releases.tlgroup == rrl.id).count())
+	print("Loading releases....")
+	db.session.execute("BEGIN;")
+	urls = Releases.query.with_entities(Releases.srcurl).filter(Releases.tlgroup == rrl.id).all()
+	try:
+		for srcurl, in tqdm.tqdm(urls):
+			if 'http://royalroadl.com/forum/showthread.php?tid=' in srcurl:
+				to_delete = Releases.query.filter(Releases.srcurl == srcurl).all()
+				for bad in to_delete:
+					db.session.delete(bad)
+				continue
+
+
+			fixed = text_tools.clean_fix_url(srcurl)
+
+			if fixed != srcurl:
+				to_fix = Releases.query.filter(Releases.srcurl == srcurl).all()
+				for row in to_fix:
+					row.srcurl = fixed
+
+				db.session.commit()
+
+				# _update_consolidate_release(mt, srcurl, fixed)
+				# print("Change: %s <- %s" % (fixed, release.srcurl))
+	finally:
+		with open("rrl_match_items.json", "w") as fp:
+			json.dump(mt.map, fp=fp, indent=4)
+
+	match_num = 0
+	return getResponse("%s Items merged." % match_num, error=False)
+
+
+def flatten_series_by_url(data, admin_override=False):
+	if admin_override is False and (not current_user.is_mod()):
 		return getResponse(error=True, message="You have to have moderator privileges to do that!")
 
 	dups = db.engine.execute('''
@@ -301,7 +655,9 @@ def flatten_series_by_url(data):
 
 	match_num = 0
 	for website, number in dups:
-		print(website, number)
+		if not "royalroadl" in website.lower():
+			continue
+
 		matches = Series.query.filter(Series.website==website).all()
 		ids = [match.id for match in matches]
 		zipped = list(zip(ids, ids[1:]))
@@ -311,8 +667,8 @@ def flatten_series_by_url(data):
 
 	return getResponse("%s Items merged." % match_num, error=False)
 
-def delete_duplicate_releases(data):
-	if not current_user.is_mod():
+def delete_duplicate_releases(data, admin_override=False):
+	if admin_override is False and (not current_user.is_mod()):
 		return getResponse(error=True, message="You have to have moderator privileges to do that!")
 
 	dups = db.engine.execute('''
@@ -330,40 +686,51 @@ def delete_duplicate_releases(data):
 
 	match_num = 0
 	mismatches = set()
-	for website, number in dups:
-		# print(website, number)
-		matches = Releases.query.filter(Releases.srcurl==website).all()
+	for release_url, number in dups:
+		matches = Releases.query.filter(Releases.srcurl==release_url).all()
 		zipped = list(zip(matches, matches[1:]))
 		for m1, m2 in zipped:
 			if m1.series != m2.series:
-				tup = (m1.series, m2.series)
+				tup = (int(m1.series), int(m2.series))
 				if tup not in mismatches:
-					print("Mismatch!")
-					print(m1.series, m2.series)
+					print("Mismatch: ", m1.series, m2.series, m1.srcurl, m2.srcurl)
 					mismatches.add(tup)
 			else:
 				match_num += 1
 				# print(m1.series, m2.series)
 
-				# Sort by change-time, since we care more about
-				# the latest change (since it'll probably be more accurate)
-				if m1.changetime < m2.changetime:
+				# Pick the older version, since untimed duplicates keep
+				# cropping up from japtem.
+				# However, if a newer release has a postfix, go with that instead.
+				if m2.postfix and m2.postfix != m1.postfix:
+					older = m2
+					newer = m1
+				elif m1.changetime < m2.changetime:
 					older = m1
 					newer = m2
 				else:
 					older = m2
 					newer = m1
-
-				db.session.delete(older)
-				db.session.commit()
+				if not older.include:
+					# If the to-be-removed chapter has been expliclty excluded from
+					# the chapter count, don't do the merge.
+					pass
+				else:
+					db.session.delete(newer)
+					db.session.commit()
 
 	# print(dups)
 	# print(list(dups))
+	mismatches = list(mismatches)
+
+	with open("rrl_match_items.json", "w") as fp:
+		json.dump(mismatches, fp=fp, indent=4)
+
 
 	return getResponse("%s Items merged." % match_num, error=False)
 
-def fix_escaped_quotes(dummy_data):
-	if not current_user.is_mod():
+def fix_escaped_quotes(dummy_data, admin_override=False):
+	if admin_override is False and (not current_user.is_mod()):
 		return getResponse(error=True, message="You have to have moderator privileges to do that!")
 
 	# SELECT * FROM series WHERE title LIKE E'%\\\'%';
@@ -414,9 +781,10 @@ def fix_escaped_quotes(dummy_data):
 			new = new.replace(r"“", '"')
 			new = new.replace(r"”", '"')
 		if old != new:
-			have = AlternateNames.query.filter(AlternateNames.name == new).scalar()
+			haves = AlternateNames.query.filter(AlternateNames.name == new).all()
+			# assert(len(have) <= 1), "too many results - '%s'" % [(t.id, t.series, t.name) for t in have]
 
-			if have:
+			for have in haves:
 				if have.series == item.series:
 					print("Duplicate names")
 					assert have.series == item.series
@@ -464,7 +832,9 @@ def fix_escaped_quotes(dummy_data):
 	return getResponse("%s main titles, %s alt titles, %s descriptions required fixing.%s" % (bad_title, bad_alt_title, bad_desc, conflicts), error=False)
 
 
-def clean_tags(dummy_data):
+def clean_singleton_tags(dummy_data, admin_override=False):
+	if admin_override is False and (not current_user.is_mod()):
+		return getResponse(error=True, message="You have to have moderator privileges to do that!")
 	bad_tags = 0
 
 	bad_tags = db.session.execute('''
@@ -506,6 +876,67 @@ def clean_tags(dummy_data):
 
 	return getResponse("Found %s tags that required patching." % (bad_tags), error=False)
 
+def delete_bad_tags(dummy_data, admin_override=False):
+	if admin_override is False and (not current_user.is_mod()):
+		return getResponse(error=True, message="You have to have moderator privileges to do that!")
+
+	conf = get_config_json()
+	print("Bad tags:", conf['delete-tags'])
+	removed = 0
+	for bad_tag in conf['delete-tags']:
+		items = Tags.query.filter(Tags.tag == bad_tag).count()
+		print("Found %s instances of tag: %s" % (items, bad_tag))
+		removed += 1
+		Tags.query.filter(Tags.tag == bad_tag).delete()
+
+	save_config_json(conf)
+	removed = 0
+	return getResponse("Found %s tags that required patching." % (removed), error=False)
+
+
+def check_merge(fromrow):
+	other = Series.query.filter(Series.title == fromrow.title.strip()).one()
+	if fromrow.title.strip() == other.title.strip():
+		fromauths = [auth.name for auth in fromrow.author]
+		toauths   = [auth.name for auth in other.author]
+		if (fromrow.tl_type == other.tl_type and
+			fromauths == toauths and
+			fromauths ):
+
+			print("Wut")
+
+			print("	", (fromrow.title, other.title))
+			print("	", (fromrow.tl_type, other.tl_type))
+			print("	", (fromauths, toauths))
+
+			print("Doing merge")
+			merge_series_ids(fromrow.id, other.id)
+			return
+	print("Mismatch:")
+	print("	URLs:")
+	print("		1: https://www.wlnupdates.com/series-id/{}/".format(fromrow.id))
+	print("		2: https://www.wlnupdates.com/series-id/{}/".format(other.id))
+
+def clean_spaces(dummy_data, admin_override=False):
+	if admin_override is False and (not current_user.is_mod()):
+		return getResponse(error=True, message="You have to have moderator privileges to do that!")
+
+
+	items = Series.query.all()
+
+	for item in items:
+		if item.title != item.title.strip():
+
+			item.title = item.title.strip()
+
+			try:
+				db.session.commit()
+			except sqlalchemy.exc.IntegrityError:
+				db.session.rollback()
+				check_merge(item)
+
+	# return getResponse("Found %s tags that required patching." % (bad_tags), error=False)
+
 def deleteSeries(data):
 
 	if not current_user.is_mod():
@@ -544,7 +975,9 @@ def deleteSeries(data):
 	for clearTable in delete_from:
 		clearTable.query.filter(clearTable.series==clean_item.id).delete()
 
+	Ratings.query.filter(Ratings.series_id==clean_item.id).delete()
 	Watches.query.filter(Watches.series_id==clean_item.id).delete()
+
 	Series.query.filter(Series.id==clean_item.id).delete()
 	SeriesChanges.query.filter(SeriesChanges.srccol==clean_item.id).delete()
 	# db.session.delete(clean_item)
@@ -576,6 +1009,8 @@ def deleteAutoReleases(data):
 			# print(release.id, release.volume, release.chapter, release.postfix, release.changeuser)
 		else:
 			print("Not deleting: ", release.id, release.volume, release.chapter, release.postfix, release.changeuser)
+
+	app.utilities.update_latest_row(clean_item)
 
 	db.session.commit()
 
@@ -652,6 +1087,42 @@ def deleteGroupAutoReleases(data):
 			# print(release.id, release.volume, release.chapter, release.postfix, release.changeuser)
 		else:
 			print("Not deleting: ", release.id, release.volume, release.chapter, release.postfix, release.changeuser)
+
+	db.session.commit()
+
+	return getResponse("Autogen releases deleted. Reloading.", error=False)
+
+def bulkToggleVolumeCountedStatus(data):
+
+	if not current_user.is_mod():
+		return getResponse(error=True, message="I see what you (tried) to do there!")
+
+	assert 'item-id' in data
+	assert 'mode'    in data
+	assert 'enable'  in data
+	assert data['mode'] == "toggle-volume-releases"
+
+	try:
+		series_id = int(data["item-id"])
+	except ValueError:
+		raise AssertionError("Failure converting item ID to integer!")
+
+	enable = data['enable']
+	assert enable in ['Include', 'Exclude']
+
+	should_include = enable == 'Include'
+
+
+	item_row = Series.query.filter(Series.id==series_id).one()
+
+	print(item_row)
+	for release in item_row.releases:
+		if release.changeuser == FeedFeeder.FeedFeeder.RSS_USER_ID or release.changeuser == FeedFeeder.FeedFeeder.NU_SRC_USER_ID:
+			if release.volume:
+				release.include = should_include
+
+
+	app.utilities.update_latest_row(item_row)
 
 	db.session.commit()
 

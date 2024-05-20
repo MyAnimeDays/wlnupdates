@@ -1,0 +1,173 @@
+
+
+{% macro post_editor(form, label="Post Content:") -%}
+	<div id='post-entry'></div>
+		{{ form.csrf_token }}
+		<div class="form-group">
+
+			<label class='pull-left'>{{label}}</label>
+			<div class='pull-right' id="wmd-button-bar" style='margin-bottom: 5px;'></div>
+			<div class="wmd-panel" style='width: 100%;'>
+				{{ form.content(class_="form-control wmd-input", rows='12', id="wmd-input") }}
+			</div>
+			{% if form.content.errors -%}
+				<ul class="errors">
+					{% for error in form.content.errors -%}
+						<li>{{ error }}</li>
+					{% endfor -%}
+				</ul>
+			{% endif -%}
+
+			Preview:
+			<div id="wmd-preview" class="wmd-panel wmd-preview well"></div>
+
+			<div class="pull-right">{{ form.submit(class_="btn btn-success") }}</div>
+			Posts are be formatted with <a href="https://help.github.com/articles/markdown-basics/">markdown</a>.
+		</div>
+	<div class='clearfix'></div>
+
+{% endmacro -%}
+
+
+{% macro post_edit_footer() -%}
+	<style>
+
+		.wmd-input {
+			box-sizing: border-box;
+			min-height: 300px;
+		}
+		.wmd-preview {
+			/*background-color: #f5f5f5;*/
+			border: 1px solid rgba(0, 0, 0, 0.05);
+			border-radius: 4px;
+			box-shadow: 0 1px 1px rgba(0, 0, 0, 0.05) inset;
+			box-sizing: border-box;
+			margin-bottom: 20px;
+			min-height: 20px;
+			padding: 19px;
+			width: 100%;
+		}
+		.wmd-preview blockquote {
+			border-color: rgba(0, 0, 0, 0.15);
+		}
+		.wmd-panel .btn-toolbar {
+			margin-bottom: 0;
+			padding: 0;
+			width: 100%;
+		}
+		.btn-group {
+			position: relative;
+		}
+		.btn-group::before, .btn-group::after {
+			content: "";
+			display: table;
+		}
+		.btn-group::after {
+			clear: both;
+		}
+		.btn-group:first-child {
+		}
+		.btn-group + .btn-group {
+			margin-left: 5px;
+		}
+
+		[class^="icon-"], [class*=" icon-"] {
+			background-image: url("/static/img/glyphicons-halflings.png");
+			background-position: 14px 14px;
+			background-repeat: no-repeat;
+			display: inline-block;
+			height: 14px;
+			line-height: 14px;
+			vertical-align: text-top;
+			width: 16px;
+		}
+		[class^="icon-"]:last-child, [class*=" icon-"]:last-child {
+		}
+		.icon-bold {
+			background-position: -167px -48px;
+		}
+		.icon-italic {
+			background-position: -192px -48px;
+		}
+		.icon-share-alt {
+			background-position: -336px -96px;
+		}
+
+		.icon-link,
+		.icon-blockquote,
+		.icon-code,
+		.icon-bullet-list,
+		.icon-list,
+		.icon-header,
+		.icon-hr-line,
+		.icon-undo {
+			background-image: url("/static/img/Markdown.Editor.Icons.png");
+		}
+		.icon-link {
+			background-position: 0 0;
+		}
+		.icon-blockquote {
+			background-position: -24px 0;
+		}
+		.icon-code {
+			background-position: -48px 0;
+		}
+		.icon-bullet-list {
+			background-position: -72px 0;
+		}
+		.icon-list {
+			background-position: -96px 0;
+		}
+		.icon-header {
+			background-position: -120px 0;
+		}
+		.icon-hr-line {
+			background-position: -144px 0;
+		}
+		.icon-undo {
+			background-position: -168px 0;
+		}
+
+
+		.wmd-prompt-background {
+			background-color: Black;
+		}
+		.wmd-prompt-dialog {
+			background-color: #f5f5f5;
+			border: 1px solid #999999;
+		}
+		.wmd-prompt-dialog > div {
+			font-family: arial,helvetica,sans-serif;
+			font-size: 0.8em;
+		}
+		.wmd-prompt-dialog > form > input[type="text"] {
+			border: 1px solid #999999;
+			color: black;
+		}
+		.wmd-prompt-dialog > form > input[type="button"] {
+			border: 1px solid #888888;
+			font-family: trebuchet MS,helvetica,sans-serif;
+			font-size: 0.8em;
+			font-weight: bold;
+		}
+
+
+
+	</style>
+	<script type="text/javascript" src="/static/js/Markdown.Converter.js"></script>
+	<script type="text/javascript" src="/static/js/Markdown.Sanitizer.js"></script>
+	<script type="text/javascript" src="/static/js/Markdown.Editor.js"></script>
+
+	<script>
+		var element_to_scroll_to = document.getElementById('post-entry');
+		element_to_scroll_to.scrollIntoView();
+
+
+		(function () {
+			var converter2 = new Markdown.Converter();
+			var editor2 = new Markdown.Editor(converter2);
+			editor2.run();
+		})();
+
+	</script>
+{% endmacro -%}

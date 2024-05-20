@@ -1,14 +1,18 @@
 
 
-from hashlib import md5
 import re
+import tqdm
+from hashlib import md5
 from app import db
+from app import app
+
 from sqlalchemy.orm import relationship
-from flask.ext.bcrypt import generate_password_hash
+from .bcrypt_wrapper import generate_password_hash
 from sqlalchemy.ext.declarative import declared_attr
 from sqlalchemy import event
 from sqlalchemy.schema import DDL
 from sqlalchemy import Table
+from sqlalchemy.orm import joinedload
 
 from sqlalchemy_searchable import make_searchable
 from sqlalchemy_utils.types import TSVectorType
@@ -17,39 +21,156 @@ import datetime
 from settings import DATABASE_DB_NAME
 from sqlalchemy import CheckConstraint
 from sqlalchemy.dialects.postgresql import ENUM
+from sqlalchemy.dialects.postgresql import JSONB
 from citext import CIText
+from sqlalchemy.ext.associationproxy import association_proxy
+
+from sqlalchemy import Column
+from sqlalchemy import Integer
+from sqlalchemy import BigInteger
+from sqlalchemy import Text
+from sqlalchemy import text
+from sqlalchemy import Float
+from sqlalchemy import Boolean
+from sqlalchemy import DateTime
+from sqlalchemy import ForeignKey
+from sqlalchemy import PrimaryKeyConstraint
+from sqlalchemy.orm import relationship
+from sqlalchemy.schema import UniqueConstraint
+from sqlalchemy.schema import PrimaryKeyConstraint
+
+import util.materialized_view_factory
 
 # Some of the metaclass hijinks make pylint confused,
 # so disable the warnings for those aspects of things
 # pylint: disable=E0213, R0903
 
-region_enum  = ENUM('western', 'eastern', 'unknown', name='region_enum')
-tl_type_enum = ENUM('oel', 'translated',             name='tl_type_enum')
+
+class ChangeLogMixin(object):
+	@declared_attr
+	def operation(cls):
+		return db.Column(db.Text())
+
+
+class ModificationInfoMixin(object):
+
+	@declared_attr
+	def changetime(cls):
+		return db.Column(db.DateTime, nullable=False, index=True, default=datetime.datetime.utcnow)
+
+	@declared_attr
+	def changeuser(cls):
+		return db.Column(db.Integer, db.ForeignKey('users.id'), index=True)
+
+
+
+###################################################################################################
+# New tags stuff:
+###################################################################################################
+
+
+class TagEntries(db.Model):
+	__tablename__ = 'db_tag_entries'
+	id          = db.Column(db.Integer, primary_key=True)
+	tag_str     = db.Column(CIText(), nullable=False, index=True)
+
+	__table_args__ = (
+			UniqueConstraint('tag_str'),
+		)
+
+class TagsLinkBase(object):
+
+	@declared_attr
+	def series_id(cls):
+		return Column(Integer, ForeignKey('series.id'),             nullable=False)
+	@declared_attr
+	def tag_id(cls):
+		return Column(Integer, ForeignKey('db_tag_entries.id'),     nullable=False)
+	@declared_attr
+	def link_weight(cls):
+		return Column(Float, nullable=False, default=1)
+
+
+class TagsLink(db.Model, TagsLinkBase, ModificationInfoMixin):
+	__tablename__ = 'db_tags_link'
+
+	__table_args__ = (
+			PrimaryKeyConstraint('series_id', 'tag_id'),
+			UniqueConstraint('series_id', 'tag_id'),
+		)
+
+class TagsLinkChanges(db.Model, TagsLinkBase, ModificationInfoMixin, ChangeLogMixin):
+	__tablename__ = "db_tags_link_changes"
+
+	srccol   = db.Column(db.Integer, db.ForeignKey('series.id', ondelete="SET NULL"))
+
+	__table_args__ = (
+		PrimaryKeyConstraint('series_id', 'tag_id', 'srccol', 'operation', 'changetime', 'changeuser'),
+	)
+
+
+
+def tag_creator(tag_txt):
+
+	tmp = db.session.query(TagEntries)         \
+		.filter(TagEntries.tag_str == tag_txt) \
+		.scalar()
+	if tmp:
+		return tmp
+
+	return TagEntries(tag_str=tag_txt)
+
+
+###################################################################################################
+# Old
+###################################################################################################
+
+
+region_enum      = ENUM('western', 'eastern', 'unknown',             name='region_enum')
+tl_type_enum     = ENUM('oel', 'translated',                         name='tl_type_enum')
+series_sort_enum = ENUM('parsed_title_order', 'chronological_order', name='series_sort_mode_enum')
 
 class SeriesBase(object):
 	id          = db.Column(db.Integer, primary_key=True)
+	type        = db.Column(db.Text())
+
 	title       = db.Column(CIText())
 	description = db.Column(db.Text())
-	type        = db.Column(db.Text())
 	origin_loc  = db.Column(db.Text())
 	demographic = db.Column(db.Text())
 	orig_lang   = db.Column(db.Text())
 
 	website     = db.Column(db.Text())
 
-	volume      = db.Column(db.Float(), default=-1)
-	chapter     = db.Column(db.Float(), default=-1)
-
 	orig_status = db.Column(db.Text())
 
-	tot_volume  = db.Column(db.Float(), default=-1)
-	tot_chapter = db.Column(db.Float(), default=-1)
-
 	region      = db.Column(region_enum, default='unknown')
+	sort_mode   = db.Column(series_sort_enum, default='parsed_title_order')
 	tl_type     = db.Column(tl_type_enum, nullable=False, index=True)
 	license_en  = db.Column(db.Boolean)
 
 	pub_date    = db.Column(db.DateTime)
+
+	latest_published   = db.Column(db.DateTime)
+
+	latest_volume      = db.Column(db.Float())
+	latest_chapter     = db.Column(db.Float())
+	latest_fragment    = db.Column(db.Float())
+
+	release_count      = db.Column(db.Integer())
+
+	rating             = db.Column(db.Float())
+	rating_count       = db.Column(db.Integer())
+
+	extra_metadata     = db.Column(JSONB)
+
+
+
+	# tl_complete = db.Column(db.Boolean, nullable=False, default=False)
+	__table_args__ = (
+		CheckConstraint('''(rating >= 0 and rating <= 10) or rating IS NULL'''),
+		)
+
 
 class TagsBase(object):
 	id          = db.Column(db.Integer, primary_key=True)
@@ -96,7 +217,7 @@ class AlternateTranslatorNamesBase(object):
 	def group(cls):
 		return db.Column(db.Integer, db.ForeignKey('translators.id'))
 	name        = db.Column(db.Text(), nullable=False, index=True)
-	cleanname   = db.Column(CIText(), nullable=False, index=True)
+	cleanname   = db.Column(CIText(),  nullable=False, index=True)
 
 class TranslatorsBase(object):
 	id    = db.Column(db.Integer, primary_key=True)
@@ -123,6 +244,7 @@ class ReleasesBase(object):
 
 	volume      = db.Column(db.Float(), index=True)
 	chapter     = db.Column(db.Float(), index=True)
+	fragment    = db.Column(db.Float(), index=True)
 	postfix     = db.Column(db.Text())
 
 	# We need to be able to filter the chapters to include in the logic for
@@ -132,10 +254,9 @@ class ReleasesBase(object):
 	# showing up as progress.
 	# As such, if include is false, the release is just ignored when looking for
 	# the furthest chapter.
-	# This is not currently exposed at all through the web-ui
 	include     = db.Column(db.Boolean, nullable=False, index=True, default=False)
 
-	srcurl      = db.Column(db.Text())
+	srcurl      = db.Column(db.Text(), index=True)
 
 	@declared_attr
 	def tlgroup(cls):
@@ -158,24 +279,10 @@ class CoversBase(object):
 		return db.Column(db.Integer, db.ForeignKey('series.id'))
 	volume      = db.Column(db.Float())
 	chapter     = db.Column(db.Float())
+	fragment    = db.Column(db.Float())
 	description = db.Column(db.Text)
 	fspath      = db.Column(db.Text)
 	hash        = db.Column(db.Text, nullable=False)
-
-
-class ChangeLogMixin(object):
-	operation      = db.Column(db.Text())
-
-
-class ModificationInfoMixin(object):
-
-	@declared_attr
-	def changetime(cls):
-		return db.Column(db.DateTime, nullable=False, index=True, default=datetime.datetime.utcnow)
-
-	@declared_attr
-	def changeuser(cls):
-		return db.Column(db.Integer, db.ForeignKey('users.id'), index=True)
 
 
 
@@ -187,8 +294,6 @@ class WikiBase(object):
 	content     = db.Column(db.Text())
 
 
-
-
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
@@ -197,9 +302,10 @@ class Series(db.Model, SeriesBase, ModificationInfoMixin):
 	__tablename__ = 'series'
 
 	__table_args__ = (
-		db.UniqueConstraint('title'),
+			UniqueConstraint('title'),
 		)
-	tags           = relationship("Tags",           backref='Series')
+
+	tags           = relationship("Tags",           backref='Series', order_by="Tags.tag")
 	genres         = relationship("Genres",         backref='Series')
 	author         = relationship("Author",         backref='Series')
 	illustrators   = relationship("Illustrators",   backref='Series')
@@ -208,6 +314,12 @@ class Series(db.Model, SeriesBase, ModificationInfoMixin):
 	releases       = relationship("Releases",       backref='Series')
 	publishers     = relationship("Publishers",     backref='Series')
 
+	@declared_attr
+	def tags_rel(cls):
+		return relationship('TagEntries', secondary="db_tags_link")
+
+	tags_prox     = association_proxy('tags_rel', 'tag_str', creator=tag_creator)
+
 
 class WikiPage(db.Model, WikiBase, ModificationInfoMixin):
 	__tablename__ = 'wiki_page'
@@ -215,8 +327,8 @@ class WikiPage(db.Model, WikiBase, ModificationInfoMixin):
 	__searchable__ = ['title']
 
 	__table_args__ = (
-		db.UniqueConstraint('title'),
-		db.UniqueConstraint('slug'),
+			UniqueConstraint('title'),
+			UniqueConstraint('slug'),
 		)
 
 
@@ -227,7 +339,7 @@ class Tags(db.Model, TagsBase, ModificationInfoMixin):
 	__searchable__ = ['tag']
 
 	__table_args__ = (
-		db.UniqueConstraint('series', 'tag'),
+			UniqueConstraint('series', 'tag'),
 		)
 	series_row     = relationship("Series",         backref='Tags')
 
@@ -236,7 +348,7 @@ class Genres(db.Model, GenresBase, ModificationInfoMixin):
 	__searchable__ = ['genre']
 
 	__table_args__ = (
-		db.UniqueConstraint('series', 'genre'),
+			UniqueConstraint('series', 'genre'),
 		)
 	series_row     = relationship("Series",         backref='Genres')
 
@@ -245,7 +357,7 @@ class Author(db.Model, AuthorBase, ModificationInfoMixin):
 	__searchable__ = ['name']
 
 	__table_args__ = (
-		db.UniqueConstraint('series', 'name'),
+			UniqueConstraint('series', 'name'),
 		)
 
 	series_row       = relationship("Series",         backref='Author')
@@ -255,7 +367,7 @@ class Illustrators(db.Model, IllustratorsBase, ModificationInfoMixin):
 	__searchable__ = ['name']
 
 	__table_args__ = (
-		db.UniqueConstraint('series', 'name'),
+			UniqueConstraint('series', 'name'),
 		)
 	series_row       = relationship("Series",         backref='Illustrators')
 
@@ -264,9 +376,9 @@ class AlternateNames(db.Model, AlternateNamesBase, ModificationInfoMixin):
 	__searchable__ = ['name', 'cleanname']
 
 	__table_args__ = (
-		db.UniqueConstraint('series', 'name'),
+			UniqueConstraint('series', 'name'),
 		)
-	series_row       = relationship("Series",         backref='AlternateNames')
+	series_row       = relationship("Series",         backref='AlternateNames', lazy='joined')
 
 
 class AlternateTranslatorNames(db.Model, AlternateTranslatorNamesBase, ModificationInfoMixin):
@@ -274,7 +386,7 @@ class AlternateTranslatorNames(db.Model, AlternateTranslatorNamesBase, Modificat
 	__searchable__ = ['name', 'cleanname']
 
 	__table_args__ = (
-		db.UniqueConstraint('group', 'name'),
+			UniqueConstraint('group', 'name'),
 		)
 	group_row       = relationship("Translators",         backref='AlternateTranslatorNames')
 
@@ -284,7 +396,7 @@ class Translators(db.Model, TranslatorsBase, ModificationInfoMixin):
 	__searchable__ = ['name']
 
 	__table_args__ = (
-		db.UniqueConstraint('name'),
+			UniqueConstraint('name'),
 		)
 
 	releases        = relationship("Releases",                 backref='Translators')
@@ -296,7 +408,7 @@ class Publishers(db.Model, PublishersBase, ModificationInfoMixin):
 	__searchable__ = ['name']
 
 	__table_args__ = (
-		db.UniqueConstraint('series', 'name'),
+			UniqueConstraint('series', 'name'),
 		)
 
 	series_row     = relationship("Series",         backref='Publisher')
@@ -312,7 +424,7 @@ class Releases(db.Model, ReleasesBase, ModificationInfoMixin):
 class Language(db.Model, LanguageBase, ModificationInfoMixin):
 	__tablename__ = 'language'
 	__table_args__ = (
-		db.UniqueConstraint('language'),
+			UniqueConstraint('language'),
 		)
 
 class Covers(db.Model, CoversBase, ModificationInfoMixin):
@@ -321,7 +433,7 @@ class Covers(db.Model, CoversBase, ModificationInfoMixin):
 
 class SeriesChanges(db.Model, SeriesBase, ModificationInfoMixin, ChangeLogMixin):
 	__tablename__ = "serieschanges"
-	srccol   = db.Column(db.Integer, db.ForeignKey('series.id', ondelete="SET NULL"), index=True)
+	srccol   = db.Column(db.Integer, db.ForeignKey('series.id', ondelete="SET NULL"))
 
 class WikiChanges(db.Model, WikiBase, ModificationInfoMixin, ChangeLogMixin):
 	__tablename__ = "wiki_pagechanges"
@@ -397,7 +509,8 @@ def create_trigger(cls):
 	# The Foreign key is null when we delete
 	deleteFromCols = ", ".join(["OLD."+item for item in colNames]+['NULL', ])
 
-	# Otherwise, mirror the new changes into the log table.
+	# Otherwise, mirror the new changes into the log table. The changed column id gets
+	# inserted into the "srccol" colum, since the current table has it's own "id" column
 	oldFromCols    = ", ".join(["NEW."+item for item in colNames+['id', ]])
 	newFromCols    = ", ".join(["NEW."+item for item in colNames+['id', ]])
 
@@ -481,6 +594,108 @@ def install_trigram_indice_on_column(table, column):
 				)
 			)
 
+def update_chp_info():
+
+	series = db.engine.execute('''
+		SELECT
+			 id,
+			 title
+		FROM series;
+		''')
+
+	series = list(series)
+
+	print("Have %s series" % len(series))
+
+
+	for sid, title in tqdm.tqdm(series):
+		releases = db.engine.execute('''
+			SELECT
+					series,
+					published,
+					volume,
+					chapter,
+					fragment,
+					include
+			FROM releases
+			WHERE series = %s
+			;
+			''', (sid, ))
+
+		releases = list(releases)
+		if not releases:
+			continue
+
+
+		most_recent = max([tmp[1] for tmp in releases])
+		relinfo = [(
+				tmp[2] if tmp[2] is not None else 0,
+				tmp[3] if tmp[3] is not None else 0,
+				tmp[4] if tmp[4] is not None else 0
+			) for tmp in releases if tmp[5]]
+		relinfo.sort()
+		reltop = max(relinfo)
+
+		res = db.engine.execute('''
+			UPDATE
+				series
+			SET
+				latest_published = %s,
+				latest_volume    = %s,
+				latest_chapter   = %s,
+				latest_fragment  = %s
+			WHERE
+				id = %s;
+			''', (
+				most_recent,
+				reltop[0] if reltop[0] else None,
+				reltop[1] if reltop[1] else None,
+				reltop[2] if reltop[2] else None,
+				sid
+				))
+
+	print("")
+	print("Committing")
+	db.engine.execute("COMMIT")
+	print("Done!")
+
+def resynchronize_ratings():
+	import app.series_tools as app_series_tools
+	ratings = db.engine.execute('''
+		SELECT
+			distinct(series_id)
+		FROM ratings;
+		''')
+
+	ratings = list(ratings)
+
+	print("Have %s ratings with ratings" % len(ratings))
+
+	for seriesid, in tqdm.tqdm(ratings):
+		with app.app_context():
+			app_series_tools.set_rating(seriesid, new_rating=None)
+
+
+	print("")
+	print("Committing")
+	db.engine.execute("COMMIT")
+	print("Done!")
+
+def resynchronize_latest_counts():
+	import app.utilities as app_utilities
+	import app.series_tools as app_series_tools
+	with app.app_context():
+		print("Loading all series")
+		all_series = Series.query.all()
+		print("Doing updates.")
+		done = 0
+		for series in tqdm.tqdm(all_series):
+			app_utilities.update_latest_row(series)
+			done += 1
+
+			if done % 100 == 0:
+				db.session.commit()
+
 def install_triggers():
 	print("Installing triggers!")
 	for classDefinition in trigger_on:
@@ -490,6 +705,7 @@ def install_triggers():
 def install_region_enum(conn):
 	print("Installing region enum type!")
 	region_enum.create(bind=conn, checkfirst=True)
+
 
 def install_tl_type_enum(conn):
 	print("Installing tl_type enum type!")
@@ -506,6 +722,57 @@ def install_trigram_indices():
 
 				install_trigram_indice_on_column(classtype, column)
 
+
+tags_mv_name = "common_tags_mv"
+tags_mv_selectable = db.select(
+						[
+							db.func.min(Tags.id).label('id'),
+							Tags.tag.label('tag'),
+							db.func.count(Tags.tag).label('tag_instances'),
+						]
+					).group_by(Tags.tag)
+
+genre_mv_name = "common_genre_mv"
+genre_mv_selectable = db.select(
+						[
+							db.func.min(Genres.id).label('id'),
+							Genres.genre.label('genre'),
+							db.func.count(Genres.genre).label('genre_instances'),
+						]
+					).group_by(Genres.genre)
+
+class CommonTags(util.materialized_view_factory.MaterializedView):
+	__table__ = util.materialized_view_factory.create_mat_view(
+					tags_mv_name,
+					tags_mv_selectable)
+
+class CommonGenres(util.materialized_view_factory.MaterializedView):
+	__table__ = util.materialized_view_factory.create_mat_view(
+					genre_mv_name,
+					genre_mv_selectable)
+
+def refresh_materialized_view():
+	print("Trying to refresh materialized views")
+	util.materialized_view_factory.refresh_mat_view(tags_mv_name, False)
+	util.materialized_view_factory.refresh_mat_view(genre_mv_name, False)
+	print("View refreshed.")
+
+def recreate_materialized_view():
+	# View not created yet, or changed
+	print("Materialized view missing or damaged.")
+	db.engine.execute("""DROP MATERIALIZED VIEW IF EXISTS common_tags_mv""", )
+	db.engine.execute("""DROP MATERIALIZED VIEW IF EXISTS common_genre_mv""", )
+	print("Recreating.")
+	t2 = util.materialized_view_factory.CreateMaterializedView(tags_mv_name, tags_mv_selectable)
+	db.engine.execute(t2)
+	t3 = util.materialized_view_factory.CreateMaterializedView(genre_mv_name, genre_mv_selectable)
+	db.engine.execute(t3)
+
+
+try:
+	refresh_materialized_view()
+except sqlalchemy.exc.ProgrammingError:
+	recreate_materialized_view()
 
 
 ################################################################################################################################################################
@@ -537,7 +804,7 @@ class FeedAuthors(db.Model):
 	name        = db.Column(CIText(), index=True, nullable=False)
 
 	__table_args__ = (
-		db.UniqueConstraint('article_id', 'name'),
+			UniqueConstraint('article_id', 'name'),
 		)
 
 class FeedTags(db.Model):
@@ -546,7 +813,7 @@ class FeedTags(db.Model):
 	tag         = db.Column(CIText(), index=True, nullable=False)
 
 	__table_args__ = (
-		db.UniqueConstraint('article_id', 'tag'),
+			UniqueConstraint('article_id', 'tag'),
 		)
 
 
@@ -566,17 +833,19 @@ class News_Posts(db.Model):
 
 
 class Watches(db.Model):
-	id          = db.Column(db.Integer, primary_key=True)
-	user_id     = db.Column(db.Integer, db.ForeignKey('users.id'))
-	series_id   = db.Column(db.Integer, db.ForeignKey('series.id'))
-	listname    = db.Column(db.Text, nullable=False, default='', server_default='')
+	id            = db.Column(db.Integer, primary_key=True)
+	user_id       = db.Column(db.Integer, db.ForeignKey('users.id'))
+	series_id     = db.Column(db.Integer, db.ForeignKey('series.id'))
+	listname      = db.Column(db.Text, nullable=False, default='', server_default='')
 
+	watch_as_name = db.Column(db.Text)
 
-	volume      = db.Column(db.Float(), default=-1)
-	chapter     = db.Column(db.Float(), default=-1)
+	volume        = db.Column(db.Float(), default=-1)
+	chapter       = db.Column(db.Float(), default=-1)
+	fragment      = db.Column(db.Float(), default=-1)
 
 	__table_args__ = (
-		db.UniqueConstraint('user_id', 'series_id'),
+			UniqueConstraint('user_id', 'series_id'),
 		)
 
 	series_row       = relationship("Series",         backref='Watches')
@@ -585,14 +854,14 @@ class Watches(db.Model):
 
 class Ratings(db.Model):
 	id          = db.Column(db.Integer, primary_key=True)
-	user_id     = db.Column(db.Integer, db.ForeignKey('users.id'), index=True)
+	user_id     = db.Column(db.Integer, db.ForeignKey('users.id'))
 	series_id   = db.Column(db.Integer, db.ForeignKey('series.id'), index=True)
 	source_ip   = db.Column(db.Text, index=True)
 
 	rating      = db.Column(db.Float(), default=-1)
 
 	__table_args__ = (
-		db.UniqueConstraint('user_id', 'source_ip', 'series_id'),
+			UniqueConstraint('user_id', 'source_ip', 'series_id'),
 		db.CheckConstraint('rating >=  0', name='rating_min'),
 		db.CheckConstraint('rating <= 10', name='rating_max'),
 		db.CheckConstraint('''(user_id IS NOT NULL AND source_ip IS NULL) OR (user_id IS NULL AND source_ip IS NOT NULL)''', name='rating_src'),
@@ -615,6 +884,8 @@ class Users(db.Model):
 	has_mod    = db.Column(db.Boolean, default=False)
 
 	news_posts = db.relationship('News_Posts')
+	ratings    = db.relationship('Ratings')
+	watches    = db.relationship('Watches')
 	# posts     = db.relationship('Post', backref='author', lazy='dynamic')
 
 
@@ -663,7 +934,7 @@ class Users(db.Model):
 	def __init__(self, nickname, email, password, verified):
 		self.nickname  = nickname
 		self.email     = email
-		self.password  = generate_password_hash(password)
+		self.password  = generate_password_hash(password.encode("UTF-8"))
 		self.verified  = verified
 
 class HttpRequestLog(db.Model):
@@ -675,159 +946,94 @@ class HttpRequestLog(db.Model):
 	forwarded_for  = db.Column(db.String)
 	originating_ip = db.Column(db.String)
 
-'''
-DELETE FROM
-    feed_authors
-WHERE
-    article_id IN (
-        SELECT
-            feeds.id
-        FROM
-            feeds
-        WHERE
-            srcname IN (
-                'www.asstr.tv',
-                'inmydaydreams.com',
-                'www.tgstorytime.org',
-                'pokegirls.com',
-                'storiesonline.net',
-                'www.adult-fanfiction.tv',
-                'www.asstr.org',
-                'www.fictionmania.com',
-                'storiesonline.org',
-                'storiesonline.tv',
-                'pokegirls.org',
-                'www.booksiesilk.com',
-                'www.tgstorytime.com',
-                'www.tgstorytime.tv',
-                'pokegirls.tv',
-                'www.booksiesilk.tv',
-                'www.asstr.net',
-                'www.adult-fanfiction.com',
-                'storiesonline.com',
-                'www.booksiesilk.org',
-                'www.adult-fanfiction.net',
-                'www.booksiesilk.net',
-                'www.adult-fanfiction.org',
-                'www.asstr.com',
-                'www.fictionmania.net',
-                'www.fictionmania.tv',
-                'www.tgstorytime.net',
-                'pokegirls.net',
-                'www.fictionmania.org',
-                'archiveofourown.org',
-                'www.baka-tsuki.org',
-                'www.booksie.com',
-                'www.fanfiction.net',
-                'www.fictionpress.com',
-                'lndb.info',
-                're-monster.wikia.com',
-                'royalroadl.com',
-                'www.royalroadl.com',
-                'a.wattpad.com',
-                'www.wattpad.com'
-            )
-    )
-;
-DELETE FROM
-    feed_tags
-WHERE
-    article_id IN (
-        SELECT
-            feeds.id
-        FROM
-            feeds
-        WHERE
-            srcname IN (
-                'www.asstr.tv',
-                'inmydaydreams.com',
-                'www.tgstorytime.org',
-                'pokegirls.com',
-                'storiesonline.net',
-                'www.adult-fanfiction.tv',
-                'www.asstr.org',
-                'www.fictionmania.com',
-                'storiesonline.org',
-                'storiesonline.tv',
-                'pokegirls.org',
-                'www.booksiesilk.com',
-                'www.tgstorytime.com',
-                'www.tgstorytime.tv',
-                'pokegirls.tv',
-                'www.booksiesilk.tv',
-                'www.asstr.net',
-                'www.adult-fanfiction.com',
-                'storiesonline.com',
-                'www.booksiesilk.org',
-                'www.adult-fanfiction.net',
-                'www.booksiesilk.net',
-                'www.adult-fanfiction.org',
-                'www.asstr.com',
-                'www.fictionmania.net',
-                'www.fictionmania.tv',
-                'www.tgstorytime.net',
-                'pokegirls.net',
-                'www.fictionmania.org',
-                'archiveofourown.org',
-                'www.baka-tsuki.org',
-                'www.booksie.com',
-                'www.fanfiction.net',
-                'www.fictionpress.com',
-                'lndb.info',
-                're-monster.wikia.com',
-                'royalroadl.com',
-                'www.royalroadl.com',
-                'a.wattpad.com',
-                'www.wattpad.com'
-            )
-    )
-;
-DELETE FROM
-    feeds
-WHERE
-    srcname IN (
-        'www.asstr.tv',
-        'inmydaydreams.com',
-        'www.tgstorytime.org',
-        'pokegirls.com',
-        'storiesonline.net',
-        'www.adult-fanfiction.tv',
-        'www.asstr.org',
-        'www.fictionmania.com',
-        'storiesonline.org',
-        'storiesonline.tv',
-        'pokegirls.org',
-        'www.booksiesilk.com',
-        'www.tgstorytime.com',
-        'www.tgstorytime.tv',
-        'pokegirls.tv',
-        'www.booksiesilk.tv',
-        'www.asstr.net',
-        'www.adult-fanfiction.com',
-        'storiesonline.com',
-        'www.booksiesilk.org',
-        'www.adult-fanfiction.net',
-        'www.booksiesilk.net',
-        'www.adult-fanfiction.org',
-        'www.asstr.com',
-        'www.fictionmania.net',
-        'www.fictionmania.tv',
-        'www.tgstorytime.net',
-        'pokegirls.net',
-        'www.fictionmania.org',
-        'archiveofourown.org',
-        'www.baka-tsuki.org',
-        'www.booksie.com',
-        'www.fanfiction.net',
-        'www.fictionpress.com',
-        'lndb.info',
-        're-monster.wikia.com',
-        'royalroadl.com',
-        'www.royalroadl.com',
-        'a.wattpad.com',
-        'www.wattpad.com'
-    );
 
 
-'''
+def validate_altnames():
+	import app.nameTools as nt
+	import app.api_handlers as aapi
+	import app.series_tools as ast
+	with app.app_context():
+		print("Loading all series")
+		all_series = Series.query.all()
+		print("Checking.")
+		for series in tqdm.tqdm(all_series):
 
+			have_plain    = AlternateNames.query.filter(AlternateNames.name      == series.title.strip()).all()
+			if not have_plain:
+				print("Missing name entry for series '%s'" % series.title)
+				ast.updateAltNames(series, [series.title], deleteother=False)
+
+				have_now = AlternateNames.query.filter(AlternateNames.name      == series.title).count()
+				assert have_now
+
+			stripped = nt.prepFilenameForMatching(series.title)
+			if stripped:
+				have_stripped = AlternateNames.query.filter(AlternateNames.cleanname == stripped).all()
+				if not have_plain:
+					ast.updateAltNames(series, [series.title], deleteother=False)
+					print("Missing cleannedname entry for series '%s' -> '%s'" % (series.title, stripped))
+					have_clean_now = AlternateNames.query.filter(AlternateNames.cleanname == stripped).count()
+					assert have_clean_now
+			else:
+				print("Series Name collapsed to empty: '%s'" % series.title)
+
+	with app.app_context():
+		print("Loading all TLs")
+		all_tls = Translators.query.all()
+		print("Checking.")
+		for tl in tqdm.tqdm(all_tls):
+			have_plain    = AlternateTranslatorNames.query.filter(AlternateTranslatorNames.name == AlternateTranslatorNames.name).all()
+
+			if not have_plain:
+				print("Missing name entry for tl group '%s'" % series.title)
+				aapi.updateGroupAltNames(tl, [tl.name], delete=False)
+
+			stripped = nt.prepFilenameForMatching(tl.name)
+			if stripped:
+				have_stripped = AlternateTranslatorNames.query.filter(AlternateTranslatorNames.cleanname == stripped).all()
+
+				if not have_plain:
+					print("Missing cleannedname entry for tl group '%s' -> '%s'" % (tl.name, stripped))
+					aapi.updateGroupAltNames(tl, [tl.name], delete=False)
+			else:
+				print("TL Name collapsed to empty: '%s'" % tl.name)
+
+def fix_ampersands():
+	return
+
+	import app.nameTools as nt
+	import app.api_handlers as aapi
+	import app.series_tools as ast
+	with app.app_context():
+		print("Loading all series")
+		all_series = Series.query.all()
+		for series in tqdm.tqdm(all_series):
+			dirty = False
+			if "&amp;" in series.title:
+				dirty = True
+				series.title = series.title.replace("&amp;", "&")
+			for altname in series.alternatenames:
+				if "&amp;" in altname.name:
+					altname.name = altname.name.replace("&amp;", "&")
+					dirty = True
+				if "&amp;" in altname.cleanname:
+					altname.cleanname = altname.cleanname.replace("&amp;", "&")
+					dirty = True
+			if dirty:
+				db.session.commit()
+
+
+def remove_n_a_altname():
+	import app.nameTools as nt
+	import app.api_handlers as aapi
+	import app.series_tools as ast
+	with app.app_context():
+		print("Loading all series")
+		all_series = Series.query.all()
+		for series in tqdm.tqdm(all_series):
+			for altname in series.alternatenames:
+				if altname.name == "N/A":
+					print(series, altname, altname.name)
+
+					db.session.delete(altname)
+					db.session.commit()

@@ -10,6 +10,10 @@ import signal
 import sys
 import os.path
 
+from app import app
+from app import api_handlers_admin
+import util.db_organize
+import util.flatten_history
 
 def printHelp():
 
@@ -20,11 +24,39 @@ def printHelp():
 	print("*********************************************************")
 	print("Organizing Tools")
 	print("*********************************************************")
-	print("	lv-merge")
+	print("	flatten-series-by-url")
+	print("		")
+	print("	delete-duplicate-releases")
+	print("		")
+	print("	fix-escaped-quotes")
+	print("		")
+	print("	clean-singleton-tags")
+	print("		")
+	print("	delete-postfix")
+	print("		")
+	print("	lv-merge-series")
 	print("		Use levenshtein string distance metrics to try to heuristically automatically")
 	print("		merge series with multiple instances.")
+	print("		")
+	print("		")
+	print("	minhash-merge-series")
+	print("		Use minhash string distance metrics to try to heuristically automatically")
+	print("		merge series with multiple instances.")
+	print("		")
+	print("	lv-auto-calc")
+	print("		Use levenshtein string distance metrics to try to heuristically automatically")
+	print("		merge series with multiple instances, write result to file for web-ui rather")
+	print("		then user-interactive merging.")
+	print("		")
+	print("	flatten-history")
+	print("		Find and consolidate change entries that don't actually have changes..")
 	print()
 	return
+
+
+one_arg_map = {
+
+}
 
 
 def parseOneArgCall(cmd):
@@ -35,10 +67,34 @@ def parseOneArgCall(cmd):
 	print ("Passed arg", mainArg)
 
 
-	if mainArg.lower() == "lv-merge":
-		from .db_organize import levenshein_merger
-		levenshein_merger()
+	arg = mainArg.lower()
 
+
+	if arg == "flatten-series-by-url":
+		with app.app_context():
+			print(api_handlers_admin.flatten_series_by_url(None, admin_override=True))
+	elif arg == "delete-duplicate-releases":
+		with app.app_context():
+			print(api_handlers_admin.delete_duplicate_releases(None, admin_override=True))
+	elif arg == "fix-escaped-quotes":
+		with app.app_context():
+			print(api_handlers_admin.fix_escaped_quotes(None, admin_override=True))
+	elif arg == "clean-singleton-tags":
+		with app.app_context():
+			print(api_handlers_admin.clean_singleton_tags(None, admin_override=True))
+	elif arg == "delete-postfix":
+		with app.app_context():
+			util.db_organize.delete_postfix()
+	elif arg == "lv-merge-series":
+		util.db_organize.levenshein_merger_series()
+	elif arg == "minhash-merge-series":
+		util.db_organize.minhash_merger_series()
+	elif arg == "lv-auto-calc":
+		util.db_organize.levenshein_merger_series(interactive=False)
+	elif arg == "lv-group-calc":
+		util.db_organize.levenshein_merger_groups(interactive=False)
+	elif arg == "flatten-history":
+		util.flatten_history.flatten_history()
 	else:
 		print("Unknown arg!")
 

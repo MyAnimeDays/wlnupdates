@@ -1,4 +1,6 @@
-from flask.ext.wtf import Form
+
+import binascii
+from flask_wtf import FlaskForm
 from wtforms import StringField
 from wtforms import BooleanField
 from wtforms import TextAreaField
@@ -14,28 +16,43 @@ from wtforms.validators import EqualTo
 from wtforms.validators import ValidationError
 from wtforms.validators import URL
 from .models import Users
-from flask.ext.bcrypt import check_password_hash
+from .bcrypt_wrapper import check_password_hash
 from app.models import Users
+from app import db
 
 def loginError():
 	raise ValidationError("Your username or password is incorrect.")
 
-class LoginForm(Form):
-	username =   StringField('Username', validators=[DataRequired(), Length(min=5)])
-	password = PasswordField('Password', validators=[DataRequired(), Length(min=8)])
+def validate_login_password(username, password):
+	user = Users.query.filter_by(nickname=username).first()
+	if user is None:
+		loginError()
+
+	# Handle flask's new annoying way of mis-packing password strings. Sigh.
+	if user.password.startswith("\\x"):
+		print("Mis-packed password! Fixing!")
+		old = user.password
+		user.password = binascii.unhexlify(user.password[2:]).decode("utf-8")
+		print("Old: ", old, "new: ", user.password)
+		db.session.commit()
+
+	if not check_password_hash(user.password.encode("UTF-8"), password.encode("UTF-8")):
+		loginError()
+
+
+
+class LoginForm(FlaskForm):
+	username    = StringField('Username', validators=[DataRequired(), Length(min=5)])
+	password    = PasswordField('Password', validators=[DataRequired(), Length(min=8)])
 	remember_me = BooleanField('remember_me', default=False)
 
 	# Validate on both the username and password,
 	# because we don't want to accidentally leak if a user
 	# exists or not
 	def validate_password(form, field):
-		user = Users.query.filter_by(nickname=form.username.data).first()
-		if user is None:
-			loginError()
-		if not check_password_hash(user.password, form.password.data):
-			loginError()
+		validate_login_password(username=form.username.data, password=form.password.data)
 
-class SignupForm(Form):
+class SignupForm(FlaskForm):
 	username  =   StringField('Username', validators=[DataRequired(), Length(min=5)])
 	password  = PasswordField('Password', validators=[DataRequired(), Length(min=8), EqualTo('pconfirm', "Your passwords must match!")])
 	pconfirm  = PasswordField('Repeat Password', validators=[DataRequired(), Length(min=8)])
@@ -46,13 +63,13 @@ class SignupForm(Form):
 		if user is not None:
 			raise ValidationError("That username is already used! Please choose another.")
 
-class NewSeriesForm(Form):
+class NewSeriesForm(FlaskForm):
 	name =   StringField('Series Title', validators=[DataRequired(), Length(min=1)])
 	type =   RadioField( 'Series Type',
 				validators=[DataRequired(message='You must supply select a type.')],
 				choices=[('oel', 'OEL - (original english language)'), ('translated', 'Translated')])
 
-class NewGroupForm(Form):
+class NewGroupForm(FlaskForm):
 	name  =   StringField('Group Name', validators=[DataRequired(), Length(min=1)])
 
 
@@ -70,9 +87,9 @@ def check_group(form, field):
 def check_volume(form, field):
 	if field.data:
 		try:
-			dat = int(field.data)
+			dat = float(field.data)
 		except ValueError:
-			raise ValidationError("Volume must be an integer value!")
+			raise ValidationError("Volume must be an numeric value!")
 	if not (field.data or form.chapter.data):
 		raise ValidationError("Volume and chapter cannot both be empty!")
 
@@ -80,22 +97,22 @@ def check_volume(form, field):
 def check_chapter(form, field):
 	if field.data:
 		try:
-			dat = int(field.data)
+			dat = float(field.data)
 		except ValueError:
-			raise ValidationError("Chapter must be an integer value!")
+			raise ValidationError("Chapter must be an numeric value!")
 	if not (field.data or form.volume.data):
 		raise ValidationError("Volume and chapter cannot both be empty!")
 
 def check_sub_chapter(form, field):
 	if field.data:
 		try:
-			dat = int(field.data)
+			dat = float(field.data)
 		except ValueError:
-			raise ValidationError("Sub-Chapter must be an integer value!")
+			raise ValidationError("Sub-Chapter must be an numeric value!")
 
 
 
-class NewReleaseForm(Form):
+class NewReleaseForm(FlaskForm):
 	volume      = StringField('Volume', validators=[check_volume])
 	chapter     = StringField('Chapter', validators=[check_chapter])
 	subChap     = StringField('Sub-Chapter', validators=[check_sub_chapter])
@@ -107,7 +124,7 @@ class NewReleaseForm(Form):
 	releasetime = DateTimeField('Release Date', format='%Y/%m/%d %H:%M')
 
 
-# class EditForm(Form):
+# class EditForm(FlaskForm):
 # 	nickname = StringField('nickname', validators=[DataRequired()])
 # 	about_me = TextAreaField('about_me', validators=[Length(min=0, max=140)])
 
@@ -134,11 +151,11 @@ class NewReleaseForm(Form):
 # 		return True
 
 
-class PostForm(Form):
+class PostForm(FlaskForm):
 	title = StringField('Title', validators=[DataRequired(), Length(max=128)])
 	content = TextAreaField('Content', validators=[DataRequired()])
 
 
-class SearchForm(Form):
+class SearchForm(FlaskForm):
 	search = StringField('search', validators=[DataRequired()])
 

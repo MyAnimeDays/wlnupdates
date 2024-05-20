@@ -11,17 +11,30 @@
 {
 	.imgDiv {
 		max-height : 615px !important;
-		max-width  : 400px !important;
-		float      : right;
-
-		display: inline-block;
-		margin-left: 10px;
-		padding: 10px;
 	}
 	.info-item
 	{
 		overflow : hidden;
 	}
+
+	.right-div {
+		max-width  : 400px !important;
+		float      : right;
+		clear      : right;
+
+		display: inline-block;
+		margin-left: 20px;
+		padding: 10px;
+	}
+}
+
+.modal-wide .modal-dialog {
+	width:75% !important;
+}
+.well-tny {
+  padding: 4px;
+  margin-bottom: 5px;
+  border-radius: 0;
 }
 
 .col-sm-9-5, .col-sm-2-5 {
@@ -36,6 +49,19 @@
 	word-wrap: break-word
 }
 
+ul.errors {
+	background-color: #fdd;
+	padding: 5px;
+	padding-left: 25px;
+}
+
+li:target {
+	background-color: #ffd;
+	padding: 5px;
+	border: 1px solid #000;
+	border-radius: 3px;
+}
+
 select.list-select
 {
 	width: auto !important;;
@@ -45,7 +71,6 @@ select.list-select
 	height: 23px !important;
 	font-size: 14px !important;
 	margin-right: 20px;
-
 }
 
 @media (min-width: 768px) {
@@ -152,16 +177,15 @@ select.list-select
 	margin-bottom: 10px;
 }
 
-a#editlink
+.light-text, .light-text a
 {
 	color: #999;
 	font-size: 75%;
 }
-a#historylink
-{
-	color: #999;
-	font-size: 75%;
-}
+
+
+
+
 textarea
 {
 	width: 100%;
@@ -182,26 +206,6 @@ body
 	margin:0 auto;
 	max-width: 1100px;
 	/*background-color: #ccc;*/
-}
-
-tr.red-highlight:nth-of-type(odd) {
-	background-color: #ffeaea !important;
-}
-tr.red-highlight:nth-of-type(even) {
-	background-color: #ffe0e0 !important;
-}
-tr.yellow-highlight:nth-of-type(odd) {
-	background-color: #fdfdbb !important;
-}
-tr.yellow-highlight:nth-of-type(even) {
-	background-color: #ffffdd !important;
-}
-
-tr.green-highlight:nth-of-type(odd) {
-	background-color: #eaffea !important;
-}
-tr.green-highlight:nth-of-type(even) {
-	background-color: #e0ffe0 !important;
 }
 
 .control-label-sm {
@@ -232,28 +236,6 @@ tr.green-highlight:nth-of-type(even) {
 
 }
 
-.updating-stalled
-{
-	background-color: #FFCCCC;
-}
-.updating-stale
-{
-	background-color: #FFFF99;
-}
-
-
-.reading-behind
-{
-	background-color: #FFCCCC;
-}
-.reading-ahead
-{
-	background-color: #FFFF99;
-}
-.reading-current
-{
-	background-color: #CCFFCC;
-}
 
 div.imgDiv {
 	position:relative;

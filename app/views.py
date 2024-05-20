@@ -1,24 +1,26 @@
 from flask import render_template
 from flask import flash
 from flask import redirect
+from flask import session as flask_session
 from flask import url_for
 from flask import request
 from flask import g
 from flask import send_file
-from flask.ext.login import login_user
-from flask.ext.login import logout_user
-from flask.ext.login import current_user
-from flask.ext.login import login_required
+from flask_login import login_user
+from flask_login import logout_user
+from flask_login import current_user
+from flask_login import login_required
 from itsdangerous import URLSafeTimedSerializer
 from itsdangerous import BadSignature
-from flask.ext.sqlalchemy import get_debug_queries
-from flask.ext.babel import gettext
+from flask_sqlalchemy import get_debug_queries
+from flask_babel import gettext
 from datetime import datetime
 # from guess_language import guess_language
 from app import app
 from app import db
 from app import lm
 from app import babel
+from app import captcha
 from .forms import  LoginForm, SearchForm, SignupForm
 from .models import Users
 from .models import News_Posts
@@ -99,12 +101,29 @@ def after_request(response):
 				"SLOW QUERY: %s\nParameters: %s\nDuration: %fs\nContext: %s\n" %
 				(query.statement, query.parameters, query.duration,
 				 query.context))
+
+	db.session.rollback()
+
+	url = request.url
+	if ('.css' in url or '.js' in url or '.svg' in url or '.png' in url or
+		'.gif' in url) :
+		# Flasks adds to the header `Vary: cookie` meaning the client should
+		# re-download the asset if the cookie changed.  If you look at the Flask
+		# source code that comes next after the below return, it will add
+		# `Vary: cookie` if and only if session.accessed is true.
+		flask_session.accessed = False
+
 	return response
+
+
+@app.teardown_appcontext
+def shutdown_session(exception=None):
+	db.session.remove()
 
 
 @app.errorhandler(404)
 def not_found_error(dummy_error):
-	print("404. Wat?")
+	print("404 for '%s' (%s). Wat?" % (request.path, request.headers.get('User-Agent')))
 	return render_template('404.html'), 404
 
 
@@ -150,7 +169,7 @@ def get_release_feeds(srctype=None):
 	q = q.order_by(desc(Releases.published))
 	q = q.options(joinedload('series_row'))
 	q = q.options(joinedload('translators'))
-	q = q.limit(20)
+	q = q.limit(40)
 
 	return q.all()
 
@@ -211,6 +230,13 @@ def sendFavIcon():
 		conditional=True
 		)
 
+@app.route('/robots.txt')
+def sendRobots():
+	return send_file(
+		"./static/robots.txt",
+		conditional=True
+		)
+
 
 
 
@@ -253,6 +279,7 @@ def login():
 		return redirect(url_for('index'))
 	form = LoginForm()
 	if form.validate_on_submit():
+		print("Login attempt %s for form %s" % (request.form.get("username", ""), form))
 		user = Users.query.filter_by(nickname=form.username.data).first()
 		if user.verified:
 			login_user(user, remember=bool(form.remember_me.data))
@@ -274,6 +301,19 @@ def signup():
 		return redirect(url_for('index'))
 	form = SignupForm()
 	if form.validate_on_submit():
+		if not captcha.validate():
+			flash(gettext('Captcha Incorrect!'))
+			return render_template('signup.html',
+								   title='Sign In',
+								   form=form)
+
+
+		have = Users.query.filter(Users.email == form.email.data).scalar()
+
+		if have:
+			return render_template('email-in-use.html', email=form.email.data)
+
+
 		user = Users(
 			nickname  = form.username.data,
 			password  = form.password.data,

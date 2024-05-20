@@ -7,18 +7,20 @@ from app.models import Genres
 from app.models import Covers
 from app.models import Author
 from app.models import Illustrators
+from app.models import Releases
 from app.models import Translators
 from app.models import Watches
 from flask import g
 from app.models import AlternateNames
 from app.models import AlternateTranslatorNames
+import app.utilities
 import markdown
 import bleach
 import os.path
 import os
 import hashlib
 from data_uri import DataURI
-from flask.ext.login import current_user
+from flask_login import current_user
 import datetime
 import dateutil.parser
 import app.nameTools as nt
@@ -50,7 +52,7 @@ VALID_KEYS = {
 	}
 
 # {
-# 	'mode': 'manga-update',
+# 	'mode': 'series-update',
 # 	'item-id': '532',
 # 	'entries':
 # 		[
@@ -137,27 +139,8 @@ def validateMangaData(data):
 	# Return the processed output.
 	return update
 
-def updateTitle(series, newTitle):
 
-	newTitle = bleach.clean(newTitle.strip())
-
-	conflict_series = Series.query.filter(Series.title==newTitle).scalar()
-
-	if conflict_series and conflict_series.id != series.id:
-		return getResponse("A series with that name already exists! Please choose another name", error=True)
-
-
-	oldTitle = series.title
-	series.title = newTitle
-
-	ret = app.series_tools.updateAltNames(series, [newTitle, oldTitle], deleteother=False)
-	if ret:
-		return ret
-
-	return None
-
-
-def processMangaUpdateJson(data):
+def process_series_update_json(data):
 	validated = validateMangaData(data)
 
 	sid = validated['id']
@@ -171,7 +154,7 @@ def processMangaUpdateJson(data):
 			if not current_user.is_mod():
 				return getResponse(error=True, message="You have to have moderator privileges to do that!")
 
-			ret = updateTitle(series, bleach.clean(entry['data'], strip=True))
+			ret = app.series_tools.updateTitle(series, entry['data'])
 			if ret:
 				return ret
 
@@ -370,6 +353,10 @@ def validateWatchedData(data):
 	if len(update['listName']) > 256:
 		raise AssertionError
 
+	update['watchAs'] = None
+	if 'watch-as' in data:
+		update['watchAs'] = bleach.clean(str(data['watch-as']), tags=[], strip=True)
+
 	# Special case handle the special list name that removes the item from the list.
 	# Set the watch to none, so the corresponsing list gets deleted.
 	# Yes, this is a hack, and I'm ignoring the "watch" boolean field in the
@@ -414,8 +401,16 @@ def setSeriesWatchJson(data):
 			series_id = cleaned['item-id'],
 			listname  = cleaned['listName'],
 		)
+		if cleaned['watchAs']:
+			newWatch.watch_as_name = cleaned['watchAs']
 
 		db.session.add(newWatch)
+		db.session.commit()
+		watch_str = "Yes"
+
+	elif watch_row and cleaned['watchAs'] and cleaned['watchAs'] != watch_row.watch_as_name:
+		# Want to watch item, item in extant list:
+		watch_row.watch_as_name = cleaned['watchAs']
 		db.session.commit()
 		watch_str = "Yes"
 
@@ -562,23 +557,18 @@ def validateReadingProgressData(inDat):
 	assert 'frag'    in inDat
 
 	try:
-		vol  = int(inDat['vol'])
-		chp  = int(inDat['chp'])
-		frag = int(inDat['frag'])
+		vol  = float(inDat['vol'])
+		chp  = float(inDat['chp'])
+		frag = float(inDat['frag'])
 		sid  = int(inDat['item-id'])
 	except ValueError:
-		raise AssertionError("Volume, chapter, and fragment must be integers!")
+		raise AssertionError("Volume, chapter, and fragment must be numbers!")
 
 	if any([item < 0 for item in (vol, chp, frag)]):
 		raise AssertionError("Values cannot be lower then 0!")
 
-	if frag > 99:
-		raise AssertionError("A chapter can only have a maximum of 99 fragments!")
 
-	chp += frag / 100.0
-
-
-	return sid, (vol, chp)
+	return sid, (vol, chp, frag)
 
 def setReadingProgressJson(data):
 	sid, progress = validateReadingProgressData(data)
@@ -588,29 +578,22 @@ def setReadingProgressJson(data):
 			(Watches.series_id==sid)
 		).one()
 
-	vol, chp = progress
+	vol, chp, frag = progress
 
 	if chp == 0 and vol == 0:
 		vol = -1
 		chp = -1
 
 	if vol == 0:
-		vol = -1
+		vol = None
 
-	watch_row.volume  = vol
-	watch_row.chapter = chp
+	if frag == 0:
+		frag = None
+
+	watch_row.volume   = vol
+	watch_row.chapter  = chp
+	watch_row.fragment = frag
 	db.session.commit()
-
-	# sid = validated['id']
-	# group = Translators.query.filter(Translators.id==sid).one()
-
-	# for entry in validated['entries']:
-	# 	print(entry)
-
-	# 	if entry['type'] == 'alternate-names':
-	# 		updateGroupAltNames(group, entry['data'])
-	# 	else:
-	# 		raise AssertionError("Unknown modifification type!")
 
 	return getResponse('Succeeded')
 
@@ -767,6 +750,129 @@ def setRatingJson(data):
 
 	return getResponse("SetRating call!.", error=False)
 
+
+def updateChapterRelease(in_id, old, new):
+
+	row = Releases.query.filter(Releases.id==int(in_id)).one()
+
+	if not current_user.is_authenticated():
+		return getResponse("Editing releases requires being logged in!.", error=True)
+
+	# if (not current_user.is_mod()) and (current_user.id != row.changeuser):
+	# 	return getResponse("You can only edit releases you added yourself!.", error=True)
+
+
+	pubdate = row.published.replace(second=0, microsecond=0)
+	compvol = row.volume   if row.volume   else 0.0
+	compchp = row.chapter  if row.chapter  else 0.0
+	compfrg = row.fragment if row.fragment else 0.0
+
+
+	assert pubdate     == old['releasetime'], "Mismatch in old item data - %s <-> %s (%s)" % (pubdate, old['releasetime'], pubdate == old['releasetime'])
+	assert compvol     == old['volume'],      "Mismatch in old item data (volume) - %s <-> %s (%s)" %     (compvol, old['volume'],     compvol == old['volume'])
+	assert compchp     == old['chapter'],     "Mismatch in old item data (chapter) - %s <-> %s (%s)" %    (compchp, old['chapter'],    compchp == old['chapter'])
+	assert compfrg     == old['subChap'],     "Mismatch in old item data (subChap) - %s <-> %s (%s)" %    (compfrg, old['subChap'],    compfrg == old['subChap'])
+	assert row.postfix == old['postfix'],     "Mismatch in old item data (postfix) - %s <-> %s (%s)" %    (row.postfix,  old['postfix'],    row.postfix  == old['postfix'])
+	assert row.include == old['counted'],     "Mismatch in old item data (counted) - %s <-> %s (%s)" %    (row.include,  old['counted'],    row.include  == old['counted'])
+	assert row.srcurl  == old['release_pg'],  "Mismatch in old item data (release_pg) - %s <-> %s (%s)" % (row.srcurl,   old['release_pg'], row.srcurl   == old['release_pg'])
+
+
+	newv = float(new['volume'])  if new['volume'] else None
+	newc = float(new['chapter']) if new['chapter'] else None
+	newf = float(new['subChap']) if new['subChap'] else None
+
+
+
+
+	newpfx = bleach.clean(new['postfix'], tags=[], strip=True)
+	oldpfx = bleach.clean(old['postfix'], tags=[], strip=True)
+	newurl = new['release_pg']
+
+	assert len(newpfx) < 200, "Postfix must be shorter then 200 characters. Passed length: %s" % (len(newpfx), )
+	assert len(newurl) < 200, "URL must be shorter then 100 characters. Passed length: %s" % (len(newurl), )
+
+	dirty = False
+	if pubdate != new['releasetime']:
+		dirty = True
+		row.published = new['releasetime']
+	if row.volume   != newv:
+		dirty = True
+		row.volume  = newv
+	if row.chapter  != newc:
+		dirty = True
+		row.chapter = newc
+	if row.fragment != newf:
+		dirty = True
+		row.fragment = newf
+	if oldpfx     != newpfx:
+		row.postfix = newpfx
+	if row.include != new['counted']:
+		dirty = True
+		row.include = bool(new['counted'])
+	if old['release_pg']  != new['release_pg']:
+		dirty = True
+		row.srcurl = newurl
+
+	if dirty:
+		app.utilities.update_latest_row(row.series_row)
+
+	db.session.commit()
+
+	return getResponse("Update release call completed!.", error=False)
+
+
+
+def processReleaseUpdateJson(data):
+
+	# Json request:
+	# {
+	#     'old-info': {
+	#         'releasetime' : '2016/08/19 05:23',
+	#         'release_pg'  : 'http://www.translationnations.com/2016/08/19/the-ultimate-evolution-volume-2-chapter-6/',
+	#         'volume'      : 2,
+	#         'postfix'     : '',
+	#         'chapter'     : 6,
+	#         'subChap'     : '',
+	#         'counted'     : True
+	#     },
+	#     'mode': 'release-update',
+	#     'id': 1183431,
+	#     'new-info': {
+	#         'releasetime' : '2016/08/19 05:23',
+	#         'release_pg'  : 'http://www.translationnations.com/2016/08/19/the-ultimate-evolution-volume-2-chapter-6/',
+	#         'volume'      : '2',
+	#         'postfix'     : '',
+	#         'chapter'     : '6',
+	#         'subChap'     : '',
+	#         'counted'     : False
+	#     }
+	# }
+
+	assert 'mode'       in data
+	assert 'release-id' in data
+	assert 'old-info'   in data
+	assert 'new-info'   in data
+	for subsect in [data['old-info'], data['new-info']]:
+		assert 'releasetime' in subsect
+		assert 'release_pg'  in subsect
+		assert 'volume'      in subsect
+		assert 'postfix'     in subsect
+		assert 'chapter'     in subsect
+		assert 'subChap'     in subsect
+		assert 'counted'     in subsect
+
+	data['old-info']['releasetime'] = dateutil.parser.parse(data['old-info']['releasetime'])
+	data['new-info']['releasetime'] = dateutil.parser.parse(data['new-info']['releasetime'])
+	if data['new-info']['releasetime'] > datetime.datetime.now():
+		data['new-info']['releasetime'] = datetime.datetime.now()
+
+	data['old-info']['volume']  = data['old-info']['volume']  if data['old-info']['volume']  else 0.0
+	data['old-info']['chapter'] = data['old-info']['chapter'] if data['old-info']['chapter'] else 0.0
+	data['old-info']['subChap'] = data['old-info']['subChap'] if data['old-info']['subChap'] else 0.0
+
+	return updateChapterRelease(data['release-id'], data['old-info'], data['new-info'])
+
+	# return getResponse("processReleaseUpdateJson call!.", error=True)
 
 
 

@@ -1,12 +1,17 @@
+
+import util.text_tools as text_tools
+
 from flask import render_template
 from flask import flash
 from flask import redirect
+from flask import request
 from flask import url_for
 from flask import g
-from flask.ext.babel import gettext
+from flask_babel import gettext
 from werkzeug.urls import url_fix
 # from guess_language import guess_language
 from app import db
+import app.utilities as app_utilities
 import datetime
 import bleach
 import markdown
@@ -25,8 +30,7 @@ from app.forms import PostForm
 import app.series_tools as series_tools
 from app import app
 import datetime
-
-
+from forum.forum.views import delete_id_internal
 
 def add_group(form):
 	name = form.name.data.strip()
@@ -55,8 +59,17 @@ def add_group(form):
 		return redirect(url_for('renderGroupId', sid=new.id))
 
 def add_series(form):
-
 	name = form.name.data.strip()
+
+	name = text_tools.fix_string(name, recase=False)
+
+
+	if "UHB949" in name or "KBR777" in name or "K B R 7 7 7 .COM" in name:
+		flash(gettext("Your account has been deleted."
+			'Try not behaving like a spammer (or failing to read) next time.'))
+		print("Delete id internal from add_series dialog for user %s (%s)" % (g.user.id, g.user.nickname))
+		delete_id_internal(g.user.id)
+		return redirect(url_for('index'))
 
 	stripped = nt.prepFilenameForMatching(name)
 	have = AlternateNames.query.filter(AlternateNames.cleanname==stripped).all()
@@ -65,7 +78,7 @@ def add_series(form):
 
 	if len(have) == 1:
 		flash(gettext('Series exists under a different name!'))
-		return redirect(url_for('renderSeriesId', sid=have[0].series))
+		return redirect(url_for('renderSeriesIdWithoutSlug', sid=have[0].series))
 
 	elif have:
 		flash(gettext('Have multiple candidate series that look like that name!'))
@@ -87,10 +100,9 @@ def add_series(form):
 
 		flash(gettext('Series Created!'))
 		# return redirect(url_for('index'))
-		return redirect(url_for('renderSeriesId', sid=new.id))
+		return redirect(url_for('renderSeriesIdWithoutSlug', sid=new.id))
 
 def add_release(form):
-	print("Add_release call")
 	chp = int(form.data['chapter'])   if form.data['chapter']   and int(form.data['chapter'])   >= 0 else None
 	vol = int(form.data['volume'])    if form.data['volume']    and int(form.data['volume'])    >= 0 else None
 	sid = int(form.data['series_id']) if form.data['series_id'] and int(form.data['series_id']) >= 0 else None
@@ -105,7 +117,7 @@ def add_release(form):
 		group = None
 
 	pubdate = form.data['releasetime']
-	postfix = bleach.clean(form.data['postfix'], strip=True)
+	postfix = bleach.clean(form.data['postfix'], strip=True) if form.data['postfix'] else ""
 
 	# Limit publication dates to now to prevent post-dating.
 	if pubdate > datetime.datetime.now():
@@ -113,26 +125,26 @@ def add_release(form):
 
 	# Sub-chapters are packed into the chapter value.
 	# I /may/ change this
-	if sub:
-		chp += sub /100
 
 	assert form.data['is_oel'] in ['oel', 'translated']
 
 	flt = [(Releases.series == sid), (Releases.srcurl == itemurl)]
+	if sub:
+		flt.append((Releases.fragment == sub))
 	if chp:
 		flt.append((Releases.chapter == chp))
 	if vol:
 		flt.append((Releases.chapter == vol))
 
 	if not any((vol, chp, postfix)):
-		flash(gettext('Releases without content in any of the chapter, volume or postfix are not valid.'))
-		return redirect(url_for('renderSeriesId', sid=sid))
+		flash(gettext('Releases without content in any of the chapter, volume or postfix fields are not valid.'))
+		return redirect(url_for('renderSeriesIdWithoutSlug', sid=sid))
 
 	have = Releases.query.filter(and_(*flt)).all()
 
 	if have:
 		flash(gettext('That release appears to already have been added.'))
-		return redirect(url_for('renderSeriesId', sid=sid))
+		return redirect(url_for('renderSeriesIdWithoutSlug', sid=sid))
 
 	series = Series.query.filter(Series.id==sid).scalar()
 	if not series:
@@ -155,6 +167,7 @@ def add_release(form):
 		published = pubdate,
 		volume    = vol,
 		chapter   = chp,
+		fragment  = sub,
 		postfix   = postfix,
 		srcurl    = itemurl,
 		changetime = datetime.datetime.now(),
@@ -162,10 +175,12 @@ def add_release(form):
 		include    = True,
 		)
 	db.session.add(new)
+	app_utilities.update_latest_row(series)
 	db.session.commit()
+
 	flash(gettext('New release added. Thanks for contributing!'))
-	flash(gettext('If the release you\'re adding has a RSS feed, you can ask for it to be added to the automatic feed system on the forum!</a>'))
-	return redirect(url_for('renderSeriesId', sid=sid))
+	flash(gettext('If the release you\'re adding has a RSS feed, you can ask for it to be added to the automatic feed system on the forum!'))
+	return redirect(url_for('renderSeriesIdWithoutSlug', sid=sid))
 
 def add_post(form):
 	title   = bleach.clean(form.data['title'], tags=[], strip=True)
@@ -196,6 +211,10 @@ dispatch = {
 @app.route('/add/<add_type>/<int:sid>/', methods=('GET', 'POST'))
 @app.route('/add/<add_type>/', methods=('GET', 'POST'))
 def addNewItem(add_type, sid=None):
+
+	if app.config['READ_ONLY']:
+		flash(gettext('Site is in read-only mode!'))
+		return redirect(url_for('index'))
 
 	if not add_type in dispatch:
 		flash(gettext('Unknown type of content to add!'))
@@ -229,10 +248,10 @@ def addNewItem(add_type, sid=None):
 	else:
 		form = form_class()
 
-	print("Trying to validate")
+	print("Trying to validate:", (form, request.form, request.args, request.headers.get('User-Agent')))
 	# print(form.validate_on_submit())
 	if form.validate_on_submit():
-		print("Post request. Validating")
+		print("Post request by uid %s. Validating" % g.user.id)
 		if have_auth:
 			print("Validation succeeded!")
 			return callee(form)
@@ -257,8 +276,8 @@ def addNewItem(add_type, sid=None):
 				'add-release.html',
 				form=form,
 				add_name = add_type,
-				message = message,
-				series  = series
+				message  = message,
+				series   = series
 				)
 
 	if add_type == 'post':
@@ -272,7 +291,7 @@ def addNewItem(add_type, sid=None):
 				'add-series.html',
 				form=form,
 				add_name = add_type,
-				message = message
+				message  = message
 				)
 
 
@@ -281,5 +300,5 @@ def addNewItem(add_type, sid=None):
 				'add.html',
 				form=form,
 				add_name = add_type,
-				message = message
+				message  = message
 				)

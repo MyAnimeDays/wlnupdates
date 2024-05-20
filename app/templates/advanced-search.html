@@ -1,0 +1,347 @@
+<!-- extend base layout -->
+
+{% macro text_search() -%}
+	<div class="flex form-inline">
+		<div class='chapter-filter-entry col-md-12'>
+			<input type='text' class="form-control col-md-12" id='title-search-input' placeholder=" Title Search" style='width: 100% !important;'/>
+		</div>
+	</div>
+{% endmacro -%}
+
+{% macro render_chapter_count() -%}
+	<div class="flex">
+		<div class='chapter-filter-entry col-md-12'>
+			<span><label>Minimum chapter count</label><span class='pull-right' id='min-chapter-readout'>0</span> <input  data-type='chapter-number' id='min-chapter' type="range"  min="0" max="100" value="0" /></span>
+		</div>
+		<br>
+		<br>
+		<div class='chapter-filter-entry col-md-12'>
+			<span><label>Maximum chapter count</label><span class='pull-right' id='max-chapter-readout'>N/A</span> <input  data-type='chapter-number' id='max-chapter' type="range"  min="0" max="101" value="101" /></span>
+		</div>
+	</div>
+{% endmacro -%}
+
+{% macro render_series_type() -%}
+	<div class="flex">
+		<div class='filter-entry category-filter-entry col-md-6' data-type='series-type'>
+			<div class="filter-mode">❍</div>
+			<div class="filter-mode-label">Original English Language</div>
+		</div>
+		<div class='filter-entry category-filter-entry col-md-6' data-type='series-type'>
+			<div class="filter-mode">❍</div>
+			<div class="filter-mode-label">Translated</div>
+		</div>
+	</div>
+
+{% endmacro -%}
+
+
+
+{% macro render_tag_categories(cats) -%}
+	<div class="flex">
+		{% for category in cats -%}
+			<div class='filter-entry mode-filter-entry col-md-3' data-type='tag-category'>
+				<div class="filter-mode">❍</div>
+				<div class="filter-mode-label">{{category.tag}}</div>
+			</div>
+		{% endfor -%}
+	</div>
+{% endmacro -%}
+
+{% macro render_genre_categories(cats) -%}
+	<div class="flex">
+		{% for category in cats -%}
+			<div class='filter-entry mode-filter-entry col-md-3' data-type='genre-category'>
+				<div class="filter-mode">❍</div>
+				<div class="filter-mode-label">{{category.genre}}</div>
+			</div>
+		{% endfor -%}
+	</div>
+{% endmacro -%}
+
+{% macro order_by() -%}
+	<div class="flex">
+			<div class='col-md-3'>
+				Order by:
+			</div>
+			<div class='col-md-3'>
+				<label><input class='sort-mode-radio' type="radio" name="order-by" value="name" checked="checked">Name</label>
+			</div>
+			<div class='col-md-3'>
+				<label><input class='sort-mode-radio' type="radio" name="order-by" value="update">Latest update</label>
+			</div>
+			<div class='col-md-3'>
+				<label><input class='sort-mode-radio' type="radio" name="order-by" value="chapter-count">Chapter Count</label>
+			</div>
+	</div>
+
+{% endmacro -%}
+
+
+{% extends "__base.html" -%}
+
+{% set title = "Advanced Search" -%}
+
+{% block content -%}
+	{% include '_block_flash.html' -%}
+	<div style="min-height: 140px;">
+		<h2>Advanced Search</h2>
+		<!--
+		<div class='well'>
+			{{text_search()}}
+		</div>
+		-->
+		<div class='well'>
+			{{render_chapter_count()}}
+		</div>
+		<div class='well'>
+			<h5>Series Type</h5>
+			{{render_series_type()}}
+		</div class='well'>
+		<div class='well'>
+			<h5>Common genres</h5>
+			{{render_genre_categories(common_genres)}}
+			<div class='clearfix' style='margin-top: 5px;'></div>
+			<div class="pull-right">
+				<button type="button" name="toggle-rare" id="toggle-rare" class='btn btn-primary'>Show</button>
+			</div>
+			<h5>Rare genres</h5>
+			<div style="display:none" id="rare-div">
+				{{render_genre_categories(rare_genres)}}
+			</div>
+			<div class='clearfix'></div>
+			<div class="pull-right">
+				<font color="#666">A genre can be used as a filter once it's applied to more then 2 series. A genre is treated as common once it is applied to more then {{common_thresh}} series.</font>
+			</div>
+			<div class='clearfix'></div>
+		</div>
+		<div class='well'>
+			<h5>Common tags</h5>
+			{{render_tag_categories(common_tags)}}
+			<div class='clearfix' style='margin-top: 5px;'></div>
+			<div class="pull-right">
+				<button type="button" name="toggle-rare" id="toggle-rare" class='btn btn-primary'>Show</button>
+			</div>
+			<h5>Rare tags</h5>
+			<div style="display:none" id="rare-div">
+				{{render_tag_categories(rare_tags)}}
+			</div>
+			<div class='clearfix'></div>
+			<div class="pull-right">
+				<font color="#666">A tag can be used as a filter once it's applied to more then 2 series. A tag is treated as common once it is applied to more then {{common_thresh}} series.</font>
+			</div>
+			<div class='clearfix'></div>
+		</div>
+		<div class='well'>
+			{{order_by()}}
+		</div>
+		<div class='well' id='search-results'>
+			Select something to view results!
+		</div>
+		<div class='well' id='go'>
+			<button type="button" id='permalink-button' class="btn btn-primary">Results Permalink</button>
+		</div>
+	</div>
+{% endblock -%}
+
+
+{% block footer -%}
+
+	<style>
+		.flex {
+
+			display: -webkit-box;
+			display: -moz-box;
+			display: -ms-flexbox;
+			display: -moz-flex;
+			display: -webkit-flex;
+			display: flex;
+			flex-wrap: wrap;
+		}
+
+		.flex > div.category-filter-entry,
+		.flex > div.mode-filter-entry {
+			/* basic styling */
+			border: 1px solid #ccc;
+			font: 14px Arial;
+
+		}
+
+		div.filter-entry{
+			display: table-row;
+			padding: 3px;
+		}
+		div.filter-mode{
+			display: table-cell;
+		}
+		div.filter-mode-label{
+			display: table-cell;
+		}
+
+
+		/* colors */
+		.filter-included
+		{
+			background: #5f9;
+		}
+		.filter-excluded
+		{
+			background: #faa;
+		}
+
+
+
+	</style>
+	<script>
+		var active_filters = {
+			'series-type'  : {},
+			'tag-category' : {},
+			'genre-category' : {},
+			'sort-mode' : "name",
+			'title-search-text' : "",
+			'chapter-limits' : [0, false],
+		};
+
+		function handle_search_load( response, status, xhr )
+		{
+			if ( status == "error" ) {
+				var msg = "Search encountered an error: ";
+				$( "#search-results" ).html( msg + xhr.status + " " + xhr.statusText );
+			}
+			else
+			{
+				// console.log("search_load_complete - Response: ", response)
+				$( "#search-results" ).html( response );
+			}
+		}
+
+		function do_ajax_search()
+		{
+			// console.log("Search commands: ", active_filters)
+			$( "#search-results" ).html( "Performing search. Please wait..." );
+			$.ajax({
+				url : "/ajax-search",
+				data: JSON.stringify(active_filters),
+				cache: false,
+				method: "POST",
+				contentType: "application/json;",
+				success : handle_search_load,
+				error   : handle_search_load,
+			});
+		}
+
+
+		function chapter_change_readout()
+		{
+			// Update the display only, don't make a request
+			var minc = $("#min-chapter").val();
+			var maxc = $("#max-chapter").val();
+			if (maxc == 101)
+				maxc = "N/A";
+			$("#min-chapter-readout").text(minc);
+			$("#max-chapter-readout").text(maxc);
+		}
+
+		function chapter_change()
+		{
+			var minc = $("#min-chapter").val();
+			var maxc = $("#max-chapter").val();
+			if (maxc == 101)
+				maxc = -1;
+			active_filters['chapter-limits'] = [minc, maxc]
+
+		}
+
+		function handle_input_update(do_fetch)
+		{
+			if (typeof(do_fetch) === 'undefined') do_fetch = true;
+
+			var current_mode = $( this ).find(".filter-mode").text();
+			var mode_text = $( this ).find(".filter-mode-label").text();
+			var title_search_text = $( "#title-search-input" ).val();
+			var dtype = $( this ).data()['type'];
+			active_filters["title-search-text"] = title_search_text;
+			active_filters["sort-mode"] = $('input[name=order-by]:checked').val();
+
+
+			if (dtype == "chapter-number")
+			{
+				chapter_change();
+			}
+
+			else if (dtype == "series-type" || dtype == "tag-category" || dtype == "genre-category")
+			{
+				if (current_mode == "❍")
+				{
+					$( this ).removeClass("filter-ignored");
+					$( this ).addClass("filter-included");
+					$( this ).find(".filter-mode").text("✔");
+					active_filters[dtype][mode_text] = "included";
+				}
+				else if (current_mode == "✔")
+				{
+					$( this ).removeClass("filter-included");
+					$( this ).removeClass("filter-excluded");
+					$( this ).addClass("filter-ignored");
+					$( this ).find(".filter-mode").text("❍");
+					delete active_filters[dtype][mode_text];
+
+					// So the anti-join generated by the exclude-tag search is
+					// basically HORRIBLE in terms of performance.
+					// $( this ).addClass("filter-excluded");
+					// $( this ).find(".filter-mode").text("✘");
+					// active_filters[dtype][mode_text] = "excluded";
+				}
+				else if (current_mode == "✘")
+				{
+					$( this ).removeClass("filter-excluded");
+					$( this ).addClass("filter-ignored");
+					$( this ).find(".filter-mode").text("❍");
+					delete active_filters[dtype][mode_text];
+				}
+				else
+				{
+					alert("Unknown contents of mode?");
+				}
+			}
+
+			if (do_fetch)
+				do_ajax_search();
+		}
+		function result_permalink()
+		{
+			handle_input_update(false);
+			// This.... is kind of horrible.
+			window.location.href = "/search?" + $.param({"json" : JSON.stringify(active_filters)});
+		}
+
+		function toggle_rare_div()
+		{
+			var b = $("#toggle-rare");
+			var d = $("#rare-div");
+			if (d.is(":hidden"))
+			{
+				b.text("Hide");
+				d.slideDown(100);
+			}
+			else
+			{
+				b.text("Show");
+				d.slideUp(100);
+			}
+		}
+
+		$("#min-chapter").on('input', chapter_change_readout);
+		$("#max-chapter").on('input', chapter_change_readout);
+
+		$(".sort-mode-radio").change(handle_input_update);
+		$("#min-chapter").change(handle_input_update);
+		$("#max-chapter").change(handle_input_update);
+		$("#title-search-input").change(handle_input_update);
+
+		$( "#permalink-button" ).click(result_permalink);
+		$( "#toggle-rare" ).click(toggle_rare_div);
+		$( ".filter-entry" ).click(handle_input_update);
+	</script>
+
+{% endblock -%}

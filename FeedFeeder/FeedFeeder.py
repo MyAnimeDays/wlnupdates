@@ -1,70 +1,39 @@
 #!/usr/bin/env python3
-from FeedFeeder.AmqpInterface import RabbitQueueHandler
-import settings
+#
 import json
 import datetime
-from app import db
-from app.models import Feeds, FeedAuthors, FeedTags
-from app.models import Translators, Releases, Series, AlternateNames, AlternateTranslatorNames
 import traceback
-import app.nameTools as nt
+import pprint
 import time
+
 import sqlalchemy.exc
+import sqlalchemy.orm.exc
+from sqlalchemy import desc
+from sqlalchemy import or_
 import bleach
-import app.series_tools
-import sqlalchemy.exc
 import Levenshtein
-# user = Users(
-# 	nickname  = form.username.data,
-# 	password  = form.password.data,
-# 	email     = form.email.data,
-# 	verified  = 0
-# )
-# print("User:", user)
-# db.session.add(user)
-# db.session.commit()
+import app.utilities
+from app import db
+from app.models import Feeds
+from app.models import FeedAuthors
+from app.models import FeedTags
+from app.models import Translators
+from app.models import Releases
+from app.models import Series
+from app.models import SeriesChanges
+from app.models import AlternateNames
+from app.models import AlternateTranslatorNames
+import app.nameTools as nt
+import app.series_tools as series_tools
 
-# class Feeds(db.Model):
+import util.text_tools as text_tools
 
-# 	id          = db.Column(db.Integer, primary_key=True)
-# 	title       = db.Column(db.Text, nullable=False)
-# 	contents    = db.Column(db.Text, nullable=False)
-# 	guid        = db.Column(db.Text, unique=True)
-# 	linkurl     = db.Column(db.Text, nullable=False)
-# 	published   = db.Column(db.DateTime, index=True, nullable=False)
-# 	updated     = db.Column(db.DateTime, index=True)
-# 	region      = db.Column(region_enum, default='unknown')
-
-# class FeedAuthors(db.Model):
-# 	id          = db.Column(db.Integer, primary_key=True)
-# 	article_id  = db.Column(db.Integer, db.ForeignKey('feeds.id'))
-# 	name        = db.Column(CIText(), index=True, nullable=False)
-
-# class FeedTags(db.Model):
-# 	id          = db.Column(db.Integer, primary_key=True)
-# 	article_id  = db.Column(db.Integer, db.ForeignKey('feeds.id'))
-# 	tag         = db.Column(CIText(), index=True, nullable=False)
-
-
-
-# Error!
-# Error!
-# Traceback (most recent call last):
-#   File "/media/Storage/Scripts/wlnupdates/FeedFeeder/FeedFeeder.py", line 444, in process
-#     beta_enabled = getattr(settings, "ENABLE_BETA", False)
-#   File "/media/Storage/Scripts/wlnupdates/FeedFeeder/FeedFeeder.py", line 406, in dispatchItem
-#     tmp = item['author']
-#   File "/media/Storage/Scripts/wlnupdates/FeedFeeder/FeedFeeder.py", line 294, in insert_parsed_release
-#     # return have.series_row
-#   File "/media/Storage/Scripts/wlnupdates/FeedFeeder/FeedFeeder.py", line 172, in get_create_series
-#     # print("AuthorName match!")
-# AttributeError: 'list' object has no attribute 'lower'
-# Main.Feeds.RPC.Thread-1 - INFO - Received data size: 563 bytes.
-# Beta release!
-
+from FeedFeeder.AmqpInterface import RabbitQueueHandler
+import settings
 
 # Hard coded RSS user ID. Probably a bad idea.
-RSS_USER_ID = 3
+RSS_USER_ID    = 3
+NU_SRC_USER_ID = 4
 
 def insert_raw_item(item):
 	'''
@@ -114,19 +83,25 @@ def insert_raw_item(item):
 	if 'updated' in item:
 		entry['updated']   = datetime.datetime.fromtimestamp(item.pop('updated'))
 
-	itemrow = Feeds.query.filter(Feeds.guid == entry['guid']).scalar()
-	if not itemrow:
+	item = text_tools.fix_dict(item, recase=False)
+
+	itemrows = Feeds.query.filter(Feeds.guid == entry['guid']).all()
+	if not itemrows:
 		print("New feed item: ", entry['guid'])
 		itemrow = Feeds(**entry)
 
 		db.session.add(itemrow)
 		db.session.flush()
+	else:
+		itemrow = itemrows[0]
 
 
 	for tag in item.pop('tags'):
-		if not FeedTags.query                           \
-			.filter(FeedTags.article_id==itemrow.id)    \
-			.filter(FeedTags.tag == tag.strip()).scalar():
+
+		# This is hitting duplicate tags somehow.
+		if tag and not FeedTags.query                      \
+			.filter(FeedTags.article_id==itemrow.id)       \
+			.filter(FeedTags.tag == tag.strip()).count():
 
 			newtag = FeedTags(article_id=itemrow.id, tag=tag.strip())
 			db.session.add(newtag)
@@ -138,14 +113,13 @@ def insert_raw_item(item):
 
 		if not FeedAuthors.query                        \
 			.filter(FeedAuthors.article_id==itemrow.id) \
-			.filter(FeedAuthors.name == author['name'].strip()).scalar():
+			.filter(FeedAuthors.name == author['name'].strip()).count():
 
 			newtag = FeedAuthors(article_id=itemrow.id, name=author['name'].strip())
 			db.session.add(newtag)
 			db.session.flush()
 
 	db.session.commit()
-
 
 def pick_best_match(group_rows, targetname):
 
@@ -173,64 +147,133 @@ def pick_best_match(group_rows, targetname):
 			(targetname, [(tmp.name, tmp.id) for tmp in group_rows], best.id, best.group_row)
 	return best
 
-def get_create_group(groupname):
+def get_create_group(groupname, changeuser):
 	groupname = groupname[:500]
 	cleanName = nt.prepFilenameForMatching(groupname)
 
-	# If the group name collapses down to nothing when cleaned, search for it without cleaning.
-	if len(cleanName):
-		have = AlternateTranslatorNames.query.filter(AlternateTranslatorNames.cleanname==cleanName).all()
-	else:
-		have = AlternateTranslatorNames.query.filter(AlternateTranslatorNames.name==groupname).all()
+	have = False
+	fails = 0
 
-	if not have:
-		print("Need to create new translator entry for ", groupname)
-		new = Translators(
-				name = groupname,
-				changeuser = RSS_USER_ID,
-				changetime = datetime.datetime.now()
-				)
-		db.session.add(new)
-		db.session.commit()
-		newalt = AlternateTranslatorNames(
-			group      = new.id,
-			name       = new.name,
-			cleanname  = nt.prepFilenameForMatching(new.name),
+	while True:
+		try:
+
+			# If the group name collapses down to nothing when cleaned, search for it without cleaning.
+			if len(cleanName):
+				have = AlternateTranslatorNames.query.filter(AlternateTranslatorNames.cleanname==cleanName).all()
+
+			if not have:
+				have = AlternateTranslatorNames.query.filter(AlternateTranslatorNames.name==groupname).all()
+
+			if not have:
+				last_try = Translators.query.filter(Translators.name == groupname).scalar()
+				if last_try:
+					# How would this be reached? Something adding groups without adding the appropriate AlternateNames?
+					return last_try
+
+				print("Need to create new translator entry for ", groupname)
+				new = Translators(
+						name = groupname,
+						changeuser = changeuser,
+						changetime = datetime.datetime.now()
+						)
+				db.session.add(new)
+				db.session.commit()
+				newalt = AlternateTranslatorNames(
+					group      = new.id,
+					name       = new.name,
+					cleanname  = nt.prepFilenameForMatching(new.name),
+					changetime = datetime.datetime.now(),
+					changeuser = changeuser,
+					)
+				db.session.add(newalt)
+				db.session.commit()
+				return new
+			else:
+				if len(have) == 1:
+					group = have[0]
+					assert group.group_row is not None, ("Wat? Row: '%s', '%s', '%s'" % (group.id, group.name, group.group_row))
+				elif len(have) > 1:
+					group = pick_best_match(have, groupname)
+				else:
+					raise ValueError("Wat for groupname: '%s'" % groupname)
+
+				row = group.group_row
+				return row
+
+
+		except sqlalchemy.exc.IntegrityError:
+			print("Concurrency issue?")
+			print("'%s', '%s'a" % (groupname, changeuser))
+			fails += 1
+			db.session.rollback()
+
+			if fails > 5:
+				raise
+
+
+def create_series(seriesname, tl_type, changeuser, author_name, alt_names = None):
+
+	if alt_names is None:
+		alt_names = []
+
+	alt_names.append(seriesname)
+
+	print("Need to create new series entry for ", seriesname)
+	new = Series(
+			title=seriesname,
+			changeuser = changeuser,  # Hard coded RSS user ID. Probably a bad idea.
 			changetime = datetime.datetime.now(),
-			changeuser = RSS_USER_ID,
-			)
-		db.session.add(newalt)
-		db.session.commit()
-		return new
-	else:
+			tl_type    = tl_type,
 
-		if len(have) == 1:
-			group = have[0]
-			assert group.group_row is not None, ("Wat? Row: '%s', '%s', '%s'" % (group.id, group.name, group.group_row))
-		elif len(have) > 1:
-			group = pick_best_match(have, groupname)
-		else:
-			raise ValueError("Wat for groupname: '%s'" % groupname)
 
-		row = group.group_row
-		return row
+		)
+	db.session.add(new)
+	db.session.flush()
 
-def get_create_series(seriesname, tl_type, author_name=False):
-	# print("get_create_series(): '%s', '%s', '%s'" % (seriesname, tl_type, author_name))
+	if author_name:
+		if isinstance(author_name, str):
+			author_name = [author_name, ]
+		series_tools.setAuthorIllust(new, author=author_name)
+
+	for altname in alt_names:
+		have  = AlternateNames                          \
+				.query                                  \
+				.filter(AlternateNames.name == altname) \
+				.order_by(AlternateNames.id)            \
+				.scalar()
+
+		if not have:
+			altn_row = AlternateNames(
+					name       = altname,
+					cleanname  = nt.prepFilenameForMatching(altname),
+					series     = new.id,
+					changetime = datetime.datetime.now(),
+					changeuser = changeuser
+				)
+			db.session.add(altn_row)
+
+	return new
+
+def get_create_series(input_series_name, tl_type, changeuser, author_name_list=False, should_create_series_if_missing=True):
+	# print("get_create_series(): '%s', '%s', '%s'" % (input_series_name, tl_type, author_name))
+
+	if isinstance(author_name_list, str):
+		author_name_list = [author_name_list]
 
 	tries = 0
 	while 1:
 		try:
 			have  = AlternateNames                             \
 					.query                                     \
-					.filter(AlternateNames.name == seriesname) \
+					.filter(AlternateNames.name == input_series_name) \
 					.order_by(AlternateNames.id)               \
 					.all()
-			# print("get_create_series for title: '%s'" % seriesname)
+
+			# print("get_create_series for title: '%s'" % input_series_name)
 			# print("Altnames matches: ", have)
 			# for item in have:
 			# 	print((item.series_row.id, item.series_row.title, [tmp.name.lower() for tmp in item.series_row.author]))
-			# print("Want:", author_name)
+			# print("Want:", author_name_list)
 
 			# There's 4 options here:
 			#  - Update and have item has author ->
@@ -247,19 +290,19 @@ def get_create_series(seriesname, tl_type, author_name=False):
 			# if we don't have a name, we look for
 
 			# Try to match any alt-names we have.
+			if not all([tmp.series_row for tmp in have]):
+				db.session.commit()
 
-			valid_haves = [tmp for tmp in have if tmp.series_row.tl_type == tl_type]
+
+			valid_haves = [tmp for tmp in have if tmp.series_row and tmp.series_row.tl_type == tl_type]
 
 			# Try for author match first:
-			if author_name:
+			if author_name_list:
 				for item in [tmp for tmp in valid_haves if tmp.series_row.author]:
-					if isinstance(author_name, list):
-						if any([auth_tmp.lower() in [tmp.name.lower() for tmp in item.series_row.author] for auth_tmp in author_name]):
-							# print("AuthorName match!")
+					if isinstance(author_name_list, list):
+						if any([auth_tmp.lower() in [tmp.name.lower() for tmp in item.series_row.author] for auth_tmp in author_name_list]):
 							return item.series_row
-					else:
-						if author_name.lower() in [tmp.name.lower() for tmp in item.series_row.author]:
-							return item.series_row
+
 
 				for item in [tmp for tmp in valid_haves if not tmp.series_row.author]:
 					return item.series_row
@@ -269,89 +312,50 @@ def get_create_series(seriesname, tl_type, author_name=False):
 					return item.series_row
 
 
-
-			# print("No match found while filtering by author-name!")
-
-
-			haveS  = Series                              \
+			have_series_row  = Series                              \
 					.query                              \
-					.filter(Series.title == seriesname) \
+					.filter(Series.title == input_series_name) \
 					.limit(1)                           \
 					.scalar()
 
-			if haveS and author_name:
-				if isinstance(author_name, str):
-					sName = "{} ({})".format(seriesname, author_name)
-				else:
-					sName = "{} ({})".format(seriesname, ", ".join(author_name))
-			elif haveS:
-				if haveS.tl_type != tl_type:
+			if have_series_row and author_name_list:
+				full_series_name = "{} ({})".format(input_series_name, ", ".join(author_name_list))
+			elif have_series_row:
+				if have_series_row.tl_type != tl_type:
 					if tl_type == "oel":
 						st = "OEL"
 					else:
 						st = tl_type.title()
-					sName = "{} ({})".format(seriesname, st)
+					full_series_name = "{} ({})".format(input_series_name, st)
 				else:
 					# print("Wat? Item that isn't in the altname table but still exists?")
-					return haveS
+					return have_series_row
 			else:
-				sName = seriesname
+				full_series_name = input_series_name
 
 
 			# We've built a new series title by appending the author/tl_type
 			# Now we need to check if that exists too.
-			if sName != seriesname:
-				haveS  = Series                              \
+			if full_series_name != input_series_name:
+				have_series_row  = Series                              \
 						.query                              \
-						.filter(Series.title == seriesname) \
+						.filter(Series.title == input_series_name) \
 						.limit(1)                           \
 						.scalar()
 
-				return haveS
+				return have_series_row
 
+			if not should_create_series_if_missing:
+				return None
 
-			print("Need to create new series entry for ", seriesname)
-			new = Series(
-					title=sName,
-					changeuser = RSS_USER_ID,  # Hard coded RSS user ID. Probably a bad idea.
-					changetime = datetime.datetime.now(),
-					tl_type    = tl_type,
+			new = create_series(seriesname=full_series_name, tl_type=tl_type, changeuser=changeuser, author_name=author_name_list, alt_names=[input_series_name])
 
-
-				)
-			db.session.add(new)
-			db.session.flush()
-
-			if author_name:
-				if isinstance(author_name, str):
-					author_name = [author_name, ]
-				app.series_tools.setAuthorIllust(new, author=author_name)
-
-			altn1 = AlternateNames(
-					name       = seriesname,
-					cleanname  = nt.prepFilenameForMatching(seriesname),
-					series     = new.id,
-					changetime = datetime.datetime.now(),
-					changeuser = RSS_USER_ID
-				)
-			db.session.add(altn1)
-
-			if sName != seriesname:
-				altn2 = AlternateNames(
-						name       = sName,
-						cleanname  = nt.prepFilenameForMatching(seriesname),
-						series     = new.id,
-						changetime = datetime.datetime.now(),
-						changeuser = RSS_USER_ID
-					)
-				db.session.add(altn2)
 			db.session.commit()
-
 
 			return new
 		except sqlalchemy.exc.IntegrityError:
 			print("Concurrency issue?")
-			print("'%s', '%s', '%s'" % (seriesname, tl_type, author_name))
+			print("'%s', '%s', '%s'" % (input_series_name, tl_type, author_name_list))
 			db.session.rollback()
 
 			tries += 1
@@ -411,54 +415,230 @@ def get_series_from_any(title_list, tl_type, author_name=False):
 
 	# return have.series_row
 
-def check_insert_release(item, group, series):
-	have = Releases.query                            \
-		.filter(Releases.series  == series.id)       \
-		.filter(Releases.tlgroup == group.id)        \
-		.filter(Releases.volume  == item['vol'])     \
-		.filter(Releases.chapter == item['chp'])     \
-		.filter(Releases.postfix == item['postfix']).all()
+def check_insert_release(item, group, series, update_id, loose_match=False, prefix_match=False):
+	cleankeys = ['itemurl', 'postfix']
+	for cleans in cleankeys:
+		if item[cleans] and isinstance(item[cleans], str):
+			item[cleans] = item[cleans].strip()
+
+	for key in ['vol', 'chp', 'frag']:
+		if item[key] is not None:
+			item[key]  = float(item[key])
+
+	relQ = have = Releases.query
+	relQ = relQ.filter(Releases.series   == series.id)
+	relQ = relQ.filter(Releases.tlgroup  == group.id)
+
+	# Allow http/https ambiguities. Sigh.
+	if item['itemurl'].startswith("http://"):
+		mainurl = item['itemurl']
+		alturl  = "https://" + item['itemurl'][7:]
+	elif item['itemurl'].startswith("https://"):
+		mainurl = item['itemurl']
+		alturl  = "http://" + item['itemurl'][8:]
+	else:
+		raise RuntimeError("Invalid url for item! Url '%s', item: '%s'" % (item['itemurl'], item))
+
+	# Patch the URL (principally the bunch of ways you can access RRL chapters.)
+	mainurl = text_tools.clean_fix_url(mainurl)
+	alturl  = text_tools.clean_fix_url(alturl)
+
+	# "Loose matching" means just check against the URL.
+	if prefix_match:
+		relQ = relQ.filter(or_(Releases.srcurl.startswith(mainurl), Releases.srcurl.startswith(alturl)))
+	elif loose_match:
+		relQ = relQ.filter(or_(Releases.srcurl == mainurl, Releases.srcurl == alturl))
+	else:
+		relQ = relQ.filter(or_(Releases.srcurl == mainurl, Releases.srcurl == alturl))
+		relQ = relQ.filter(Releases.volume   == item['vol'])
+		relQ = relQ.filter(Releases.chapter  == item['chp'])
+		relQ = relQ.filter(Releases.fragment == item['frag'])
+		relQ = relQ.filter(Releases.postfix  == item['postfix'])
+
+	have = relQ.all()
+
 	if have:
 		have = have.pop(0)
-		# print("have?", series.title, have.volume, have.chapter, have.postfix)
+		if loose_match:
+			print("Loosely matched release:", series.title, have.volume, have.chapter, have.postfix)
 		return
-	print("Adding new release for series: ", series.title, " at date:", datetime.datetime.fromtimestamp(item['published']))
+
+	# Clamp timestamp
+	published_on = datetime.datetime.fromtimestamp(min(max(0, item['published']), time.time()))
+
+	print("Adding new release for series: ", series.title, " at date:", published_on)
 	release = Releases(
 			series     = series.id,
-			published  = datetime.datetime.fromtimestamp(item['published']),
+			published  = published_on,
 			volume     = item['vol'],
 			chapter    = item['chp'],
+			fragment   = item['frag'],
 			include    = True,
 			postfix    = item['postfix'],
 			tlgroup    = group.id,
 			changetime = datetime.datetime.now(),
-			changeuser = RSS_USER_ID,
+			changeuser = update_id,
 			srcurl     = item['itemurl'],
 		)
 
-
 	db.session.add(release)
 	db.session.flush()
+
+	app.utilities.update_latest_row(series)
+
 	db.session.commit()
+
+def check_delete_release(item, group, series, update_id, loose_match=False, prefix_match=False):
+	cleankeys = ['itemurl', 'postfix']
+	for cleans in cleankeys:
+		if item[cleans] and isinstance(item[cleans], str):
+			item[cleans] = item[cleans].strip()
+
+	for key in ['vol', 'chp', 'frag']:
+		if item[key] is not None:
+			item[key]  = float(item[key])
+
+	relQ = have = Releases.query
+	relQ = relQ.filter(Releases.series   == series.id)
+	relQ = relQ.filter(Releases.tlgroup  == group.id)
+
+	# "Loose matching" means just check against the URL.
+	if prefix_match:
+		relQ = relQ.filter(Releases.srcurl.startswith(item['itemurl']))
+	elif loose_match:
+		relQ = relQ.filter(Releases.srcurl   == item['itemurl'])
+	else:
+		relQ = relQ.filter(Releases.srcurl   == item['itemurl'])
+		relQ = relQ.filter(Releases.volume   == item['vol'])
+		relQ = relQ.filter(Releases.chapter  == item['chp'])
+		relQ = relQ.filter(Releases.fragment == item['frag'])
+		relQ = relQ.filter(Releases.postfix  == item['postfix'])
+
+	have = relQ.all()
+
+	have = list(have)
+	print("Deleting %s releases!" % len(have))
+
+	if not have:
+		return
+
+	for bad in have:
+		db.session.delete(bad)
+
+
+	app.utilities.update_latest_row(series)
+	db.session.commit()
+
 
 def insert_parsed_release(item):
 	assert 'tl_type' in item
 	assert 'srcname' in item
 	assert 'series'  in item
 
+	if "nu_release" in item:
+		update_id = NU_SRC_USER_ID
+	else:
+		update_id = RSS_USER_ID
+
+
+	item = text_tools.fix_dict(item, recase=False)
 
 	if item["tl_type"] not in ['oel', 'translated']:
 		raise ValueError("Invalid TL Type '%s'! Wat?" % item["tl_type"])
 
-	group = get_create_group(item['srcname'])
+	group = get_create_group(item['srcname'], update_id)
+	assert group is not None
+
+	kwargs = {
+		"input_series_name" : item['series'],
+		"tl_type"           : item["tl_type"],
+		"changeuser"        : update_id,
+	}
+
 
 	if 'match_author' in item and item['match_author']:
-		series = get_create_series(item['series'], item["tl_type"], item['author'])
-	else:
-		series = get_create_series(item['series'], item["tl_type"])
+		kwargs['author_name_list'] = item['author']
+	series = get_create_series(**kwargs)
 
+
+	prefix_match = item.get('prefix_match', False)
+	loose_match  = item.get('loose_match', False)
+	check_insert_release(item, group, series, update_id, loose_match=loose_match, prefix_match=prefix_match)
+
+def delete_parsed_release(item):
+	assert 'tl_type' in item
+	assert 'srcname' in item
+	assert 'series'  in item
+
+	if "nu_release" in item:
+		update_id = NU_SRC_USER_ID
+	else:
+		update_id = RSS_USER_ID
+
+
+	item = text_tools.fix_dict(item, recase=False)
+
+	if item["tl_type"] not in ['oel', 'translated']:
+		raise ValueError("Invalid TL Type '%s'! Wat?" % item["tl_type"])
+
+	group = get_create_group(item['srcname'], update_id)
 	assert group is not None
-	check_insert_release(item, group, series)
+
+	kwargs = {
+		"input_series_name" : item['series'],
+		"tl_type"           : item["tl_type"],
+		"changeuser"        : update_id,
+	}
+
+	if 'match_author' in item and item['match_author']:
+		kwargs['author_name_list'] = item['author']
+
+	series = get_create_series(should_create_series_if_missing=False, **kwargs)
+
+	if not series:
+		return
+
+	prefix_match = item.get('prefix_match', False)
+	loose_match  = item.get('loose_match', False)
+
+	check_delete_release(item, group, series, update_id, loose_match=loose_match, prefix_match=prefix_match)
+
+def rowToDict(row):
+	return {x.name: getattr(row, x.name) for x in row.__table__.columns}
+
+maskedRows = ['id', 'operation', 'srccol', 'changeuser', 'changetime']
+
+def generate_automated_only_change_flags(series):
+	inRows  = SeriesChanges                              \
+			.query                                     \
+			.filter(SeriesChanges.srccol == series.id) \
+			.order_by(desc(SeriesChanges.changetime))  \
+			.all()
+
+	inRows = [rowToDict(row) for row in inRows]
+	inRows.sort(key = lambda x: x['id'])
+
+	# Generate the list of rows we actually want to process by extracting out
+	# the keys in the passed row, and masking out the ones we specifically don't want.
+	if inRows:
+		processKeys = [key for key in inRows[0].keys() if key not in maskedRows]
+		processKeys.sort()
+	else:
+		processKeys = []
+
+	# Prime the loop by building an empty dict to compare against
+	previous = {key: None for key in processKeys}
+
+	can_change = {key : True for key in processKeys}
+
+	for row in inRows:
+		for key in processKeys:
+			if (row[key] != previous[key]) and (row[key] or previous[key]):
+				if row['changeuser'] != RSS_USER_ID:
+					can_change[key] = False
+				previous[key] = row[key]
+
+	return can_change
 
 def update_series_info(item):
 	# print("update_series_info", item)
@@ -467,6 +647,9 @@ def update_series_info(item):
 	assert 'tags'     in item
 	assert 'desc'     in item
 	assert 'tl_type'  in item
+
+	item = text_tools.fix_dict(item, recase=False)
+
 
 
 	print("Series info update message for '%s'!" % item['title'])
@@ -480,7 +663,12 @@ def update_series_info(item):
 	if item['update_only']:
 		series = get_series_from_any(item['alt_titles'], item["tl_type"], item['author'])
 	else:
-		series = get_create_series(item['title'], item["tl_type"], item['author'])
+		series = get_create_series(
+				input_series_name = item['title'],
+				tl_type           = item["tl_type"],
+				changeuser        = RSS_USER_ID,
+				author_name_list  = item['author']
+			)
 
 	# Break if the tl type has changed, something is probably mismatched
 	if series.tl_type != item['tl_type']:
@@ -510,32 +698,111 @@ def update_series_info(item):
 
 		return
 
-	if 'desc' in item and item['desc'] and not series.description:
-		series.description = bleach.clean(item['desc'], strip=True, tags = ['p', 'em', 'strong', 'b', 'i', 'a'])
+	changeable = generate_automated_only_change_flags(series)
+	# print(changeable)
+	# print(item)
 
-	if 'homepage' in item and item['homepage'] and not series.website:
-		series.website = bleach.clean(item['homepage'])
+	# {
+	# 	'license_en': True,
+	# 	'orig_lang': True,
+	# 	'pub_date': True,
+	# 	'title': True,
+	# 	'description': False,
+	# 	'chapter': True,
+	# 	'origin_loc': True,
+	# 	'website': True,
+	# 	'region': True,
+	# 	'tl_type': True,
+	# 	'tot_chapter': True,
+	# 	'orig_status': True,
+	# 	'sort_mode': True,
+	# 	'volume': True,
+	# 	'demographic': True,
+	# 	'tot_volume': True,
+	# 	'type': True
+	# }
+
+	# This only generates a change is it needs to, so we can call it unconditionally.
+	if changeable['title']:
+		series_tools.updateTitle(series, item['title'])
+
+	if changeable['description'] and 'desc' in item and item['desc']:
+		newd = bleach.clean(item['desc'], strip=True, tags = ['p', 'em', 'strong', 'b', 'i', 'a'])
+		if newd != series.description and len(newd.strip()):
+			series.description = newd
+	elif ('desc' in item and item['desc'] and not series.description):
+		newd = bleach.clean(item['desc'], strip=True, tags = ['p', 'em', 'strong', 'b', 'i', 'a'])
+		if len(newd.strip()):
+			series.description = newd
+
+	if 'homepage' in item  and item['homepage']:
+		cleaned_homepage = bleach.clean(item['homepage']).lower().strip()
+		if (
+			not series.website or
+			(cleaned_homepage not in series.website.lower() and changeable['website'])
+		):
+
+			have_pages = series.website.lower().split("\n") if series.website else []
+
+			have_pages = [pg.strip() for pg in have_pages if pg.strip()]
+			have_pages = set(have_pages)
+
+
+			if len(cleaned_homepage):
+				have_pages.add(cleaned_homepage)
+
+				have_pages = list(have_pages)
+				have_pages.sort()                # Order resulting site list.
+
+				series.website = "\n".join(have_pages)
+
+	if 'coostate' in item  and item['coostate']:
+		if not series.orig_status or (item['coostate'] != series.orig_status and changeable['orig_status']):
+			neww = bleach.clean(item['coostate'])
+			if  len(neww.strip()):
+				series.orig_status = neww
+
+	if 'tl_type' in item  and item['tl_type']:
+		if not series.tl_type or (item['tl_type'] != series.tl_type and changeable['tl_type']):
+			neww = bleach.clean(item['tl_type']).strip()
+			if neww and neww in ['western', 'eastern', 'unknown']:
+				series.tl_type = neww
+
+	# if 'transcomplete' in item  and item['transcomplete']:
+	# 	if not series.tl_complete or (item['transcomplete'] != series.tl_complete and changeable['transcomplete']):
+	# 		neww = item['transcomplete'].strip()
+	# 		if neww and neww in ['yes', 'no']:
+	# 			series.tl_complete = neww
+
+	if 'licensed' in item  and item['licensed']:
+		if not series.license_en or (item['licensed'] != series.license_en and changeable['license_en']):
+			neww = item['licensed'].strip().lower()
+			if neww and neww in ['yes', 'no']:
+				series.license_en = neww == 'yes'
 
 	if 'author' in item and item['author']:
 		tmp = item['author']
 		if isinstance(tmp, str):
 			tmp = [tmp, ]
-		app.series_tools.setAuthorIllust(series, author=tmp, deleteother=False)
+		series_tools.setAuthorIllust(series, author=tmp, deleteother=False)
 
 	if 'illust' in item and item['illust']:
 		tmp = item['illust']
 		if isinstance(tmp, str):
 			tmp = [tmp, ]
-		app.series_tools.setAuthorIllust(series, illust=tmp, deleteother=False)
+		series_tools.setAuthorIllust(series, illust=tmp, deleteother=False)
 
 	if 'tags' in item and item['tags']:
-		app.series_tools.updateTags(series, item['tags'], deleteother=False, allow_new=False)
+		series_tools.updateTags(series, item['tags'], deleteother=False, allow_new=item.get('create_tags', False))
+
+	if 'genres' in item and item['genres']:
+		series_tools.updateGenres(series, item['genres'], deleteother=False)
 
 	if 'alt_titles' in item and item['alt_titles']:
-		app.series_tools.updateAltNames(series, item['alt_titles'], deleteother=False)
+		series_tools.updateAltNames(series, item['alt_titles']+[item['title'], ], deleteother=False)
 
 	if 'pubnames' in item and item['pubnames']:
-		app.series_tools.updatePublishers(series, item['pubnames'], deleteother=False)
+		series_tools.updatePublishers(series, item['pubnames'], deleteother=False)
 
 	if 'pubdate' in item and item['pubdate']:
 		if not series.pub_date:
@@ -550,6 +817,8 @@ def update_series_info(item):
 	db.session.commit()
 
 def dispatchItem(item):
+	if isinstance(item, bytes):
+		item = item.decode("utf-8")
 	item = json.loads(item)
 	assert 'type' in item
 	assert 'data' in item
@@ -563,7 +832,7 @@ def dispatchItem(item):
 			print("Beta release!")
 
 
-	for x in range(9999):
+	for x in range(100):
 
 		try:
 
@@ -574,6 +843,9 @@ def dispatchItem(item):
 			elif item['type'] == 'parsed-release':
 				# print("Dispatching item of type: ", item['type'])
 				insert_parsed_release(item['data'])
+			elif item['type'] == 'delete-release':
+				# print("Dispatching item of type: ", item['type'])
+				delete_parsed_release(item['data'])
 			elif item['type'] == 'series-metadata':
 				# print("Dispatching item of type: ", item['type'])
 				update_series_info(item['data'])
@@ -596,20 +868,43 @@ def dispatchItem(item):
 				print("Rollback failed!")
 
 			if x > 3:
+				e.extra_message = "Assertion Error inserting row (attempt %s)!" % x
 				raise e
 
-		except sqlalchemy.exc.IntegrityError as e:
-
+		except sqlalchemy.orm.exc.StaleDataError as e:
 			print("ERROR INSERTING ROW (attempt %s)!" % x)
 			traceback.print_exc()
 			db.session.rollback()
-
-			if x > 3:
+			if x > 20:
+				e.extra_message = "Failure after %s retries!" % x
 				raise e
+
+		except sqlalchemy.exc.IntegrityError as e:
+			print("ERROR INSERTING ROW (attempt %s)!" % x)
+			traceback.print_exc()
+			db.session.rollback()
+			if x > 20:
+				e.extra_message = "Failure after %s retries!" % x
+				raise e
+
+		except Exception as e:
+			print("Unknown error inserting row")
+			traceback.print_exc()
+			try:
+				db.session.rollback()
+			except Exception:
+				print("Rollback failed!")
+			e.extra_message = "Unknown error inserting row"
+			raise e
+
+
+	try:
+		db.session.rollback()
+	except Exception:
+		print("Rollback failed!")
 
 	print("CRITICAL:")
 	print("Failed to update item!")
-
 
 class FeedFeeder(object):
 	die = False
@@ -636,8 +931,16 @@ class FeedFeeder(object):
 			else:
 				try:
 					dispatchItem(data)
-				except Exception:
+				except Exception as exc:
 					with open("error - %s.txt" % time.time(), 'w') as fp:
+						fp.write("Error inserting item!\n")
+						if hasattr(exc, "extra_message"):
+							fp.write(exc.extra_message)
+							fp.write("\n")
+						fp.write("\n")
+						fp.write(pprint.pformat(data))
+						fp.write("\n")
+						fp.write("\n")
 						fp.write(traceback.format_exc())
 					print("Error!")
 					traceback.print_exc()
@@ -649,21 +952,21 @@ class FeedFeeder(object):
 		print("FeedFeeder being deleted")
 
 
-if __name__ == "__main__":
-	# ret = get_create_series("World Seed", "oel", author_name='karami92')
-	assert None != get_series_from_any(["World Seed"], "oel", author_name='karami92')
-	assert None != get_series_from_any(["Sendai Yuusha wa Inkyou Shitai", 'Sendai Yuusha wa Inkyoshitai', 'The Previous Hero wants to Retire', '先代勇者は隠居したい'], "translated", author_name='Iida K')
-	assert None == get_series_from_any(["Sendai Yuusha wa Inkyou Shitai", 'Sendai Yuusha wa Inkyoshitai', 'The Previous Hero wants to Retire', '先代勇者は隠居したい'], "translated", author_name='BLURKKKK')
-	assert None != get_series_from_any(["Sendai Yuusha wa Inkyou Shitai", 'Sendai Yuusha wa Inkyoshitai', 'The Previous Hero wants to Retire', '先代勇者は隠居したい'], "translated", author_name=None)
-	assert None != get_series_from_any(['Kenkyo, Kenjitsu o Motto ni Ikite Orimasu', '謙虚、堅実をモットーに生きております！'], "translated", author_name=None)
-	assert None != get_series_from_any(['Kenkyo, Kenjitsu o Motto ni Ikite Orimasu', '謙虚、堅実をモットーに生きております！'], "translated", author_name='Hiyoko no kēki')
-	assert None != get_series_from_any(['Mythical Tyrant', '神魔灞体'], "translated", author_name='Yun Ting Fei')
-	print(get_series_from_any(['Peerless Martial God'], "translated", author_name=["Jing Wu Hen", "净无痕"]))
-	# assert None == get_series_from_any(['Mythical Tyrant', '神魔灞体'], "translated", author_name='BLHOOGLE!')
+def amqp_thread_run():
+	import flags
+
+	try:
+		interface = FeedFeeder()
+		for x in range(90):
+			interface.process()
+			time.sleep(1)
+	finally:
+		print("Closing")
+		interface.close()
 
 
 
-	# assert None != get_series_from_any(['Night Ranger', 'An Ye You Xia', '暗夜游侠'], "translated", author_name=None)
-	# assert None != get_series_from_any(['Night Ranger', 'An Ye You Xia', '暗夜游侠'], "translated", author_name='Dark Blue Coconut Milk')
-	# assert None != get_series_from_any(['Night Ranger', 'An Ye You Xia', '暗夜游侠'], "translated", author_name='深蓝椰子汁')
-	pass
+if __name__ == '__main__':
+	import logSetup
+	logSetup.initLogging()
+	amqp_thread_run()

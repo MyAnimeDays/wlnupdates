@@ -3,18 +3,18 @@
 {% macro tableHeader() -%}
 	<table class='table-striped table table-bordered table-condensed fullwidth'>
 
-		<col style="width: 60px">
+		<col style="width: 40px">
 		<col>
 		<col style="width: 30px">
 		<col style="width: 30px">
 		<col style="width: 30%">
-		{% if show_group != False %}
+		{% if show_group != False -%}
 			<col style="width: 20%">
-		{% endif %}
+		{% endif -%}
 
-		{% if g.user.is_mod() %}
+		{% if g.user.is_mod() -%}
 			<col style="width: 10px">
-		{% endif %}
+		{% endif -%}
 		<col >
 		<tr>
 			<th>
@@ -32,35 +32,35 @@
 			<th>
 				Extra
 			</th>
-			{% if show_group != False %}
+			{% if show_group != False -%}
 				<th>
 					Group/Host
 				</th>
-			{% endif %}
+			{% endif -%}
 
-			{% if g.user.is_mod() %}
+			{% if g.user.is_authenticated() -%}
 				<th>
 					C
 				</th>
-			{% endif %}
+			{% endif -%}
 		</tr>
-{%- endmacro %}
+{%- endmacro -%}
 
 {% macro tableFooter() -%}
 	</table>
-{%- endmacro %}
+{%- endmacro -%}
 
-{% if release_items: %}
-	{% if chunk %}
+{% if release_items: -%}
+	{% if chunk -%}
 		<h4>
 			{{ format_date(release_items[0].published) }}
 		</h4>
-		{% set lastitemday = release_items[0].published.day %}
-	{% endif %}
+		{% set lastitemday = namespace(pd=release_items[0].published.day)  -%}
+	{% endif -%}
 	{{ tableHeader() }}
-	{% for entry in release_items: %}
+	{% for entry in release_items: -%}
 
-		{% if chunk and entry.published.day != lastitemday %}
+		{% if chunk and entry.published.day != lastitemday.pd -%}
 
 			{{ tableFooter() }}
 
@@ -68,78 +68,86 @@
 				{{ format_date(entry.published) }}
 			</h4>
 			{{ tableHeader() }}
-			{% set lastitemday = entry.published.day %}
-		{% endif %}
+			{% set lastitemday.pd = entry.published.day -%}
+		{% endif -%}
 
-		{% if g.user.is_mod() %}
+		{% if g.user.is_authenticated() -%}
 			<tr id='release-entry'
 				data-id="{{entry.id}}"
 				data-counted="{{entry.include}}"
 				data-added-by="{{getUserId(entry.changeuser)}}"
-				data-added-on='{{entry.published}}'
+				data-added-by-id="{{ entry.changeuser }}"
+				data-added-on='{{format_js_date(entry.published)}}'
 				data-added-ago='{{ago(entry.published)}}'
+				data-volume='{{entry.volume if entry.volume else ''}}'
+				data-chapter='{{entry.chapter if entry.chapter else ''}}'
+				data-fragment='{{entry.fragment if entry.fragment else ''}}'
+				data-postfix='{{entry.postfix if entry.postfix else ''}}'
+				data-url='{{entry.srcurl}}'
 				>
-		{% else %}
+		{% else -%}
 			<tr id='release-entry'>
-		{% endif %}
+		{% endif -%}
 
 			<td>
-				{% if g.user.id == 2 %}
-					<a href='http://10.1.1.60:5001/view?url={{entry.srcurl | urlencode}}'>R-View</a>
-				{% else %}
-					<a href='{{entry.srcurl}}'>View</a>
-				{% endif %}
+				{% if g.user.id == 2 -%}
+					<a href='http://10.1.1.60:5001/view?url={{entry.srcurl | urlencode}}'><center>R-<i class="glyphicon glyphicon-eye-open"></i></center></a>
+				{% else -%}
+					<a href='{{entry.srcurl}}'><center><i class="glyphicon glyphicon-eye-open"></i></center></a>
+				{% endif -%}
 
 			</td>
 			<td>
 				<a href='/series-id/{{entry.series}}/'>{{entry.series_row.title}}</a>
+				{%- if entry.series_row.extra_metadata and entry.series_row.extra_metadata.get("is_yaoi") -%}
+					<span class='pull-right fa fa-mars-double'></span>
+				{% endif -%}
+				{%- if entry.series_row.extra_metadata and entry.series_row.extra_metadata.get("is_yuri") -%}
+					<span class='pull-right fa fa-venus-double'></span>
+				{% endif -%}
 
 			</td>
-			{% if entry.volume != None %}
-				<td class='numeric' id='release-entry-cell'>
-					{{entry.volume | int}}
+			{% if entry.volume != None -%}
+				<td class='numeric' class='release-entry-cell'>
+					{{ ( entry.volume | float |round(2)|string).rstrip('0').rstrip('.') }}
 				</td>
-			{% endif %}
-			{% if entry.chapter != None %}
-				<td class='numeric' {{ "colspan=2" if entry.volume == None  }} id='release-entry-cell'>
+			{% endif -%}
+			{% if entry.chapter != None or entry.fragment != None -%}
+				<td class='numeric' {{ "colspan=2" if entry.volume == None  }} class='release-entry-cell'>
 
-					{% if entry.chapter % 1 == 0 %}
-						{{('%i' % entry.chapter)}}
-					{% elif entry.chapter != None %}
-						{{('%0.2f' % entry.chapter)}}
-					{% endif %}
+					{% if entry.chapter -%}{{ ( entry.chapter | float |round(2)|string).rstrip('0').rstrip('.') }}{% endif -%}{% if entry.chapter and entry.fragment -%}-{% endif -%}{% if entry.fragment -%}{{ ( entry.fragment | float |round(2)|string).rstrip('0').rstrip('.') }}{% endif -%}
 				</td>
-			{% endif %}
+			{% endif -%}
 
-			{% if entry.chapter == None and entry.volume == None %}
-				<td class='postfix' {{ "colspan=3" if entry.chapter == None  }} id='release-entry-cell'>
-			{% elif entry.chapter == None %}
-				<td class='postfix' {{ "colspan=2" if entry.chapter == None  }} id='release-entry-cell'>
-			{% else %}
-				<td class='postfix' id='release-entry-cell'>
-			{% endif %}
+			{% if entry.chapter == None and entry.volume == None and entry.fragment == None -%}
+				<td class='postfix' {{ "colspan=3" if entry.chapter == None  }} class='release-entry-cell'>
+			{% elif entry.chapter == None and entry.fragment == None -%}
+				<td class='postfix' {{ "colspan=2" if entry.chapter == None  }} class='release-entry-cell'>
+			{% else -%}
+				<td class='postfix' class='release-entry-cell'>
+			{% endif -%}
 				{{entry.postfix | safe}}
 			</td>
 
-			{% if show_group != False %}
-				<td id='release-entry-cell'>
+			{% if show_group != False -%}
+				<td class='release-entry-cell'>
 					<a href='/group-id/{{ entry.translators.id }}/'>{{entry.translators.name}}</a>
 				</td>
-			{% endif %}
-			{% if g.user.is_mod() %}
-				<td id='release-entry-cell'>
-					{% if entry.include %}
-						◯
-					{% else %}
-						✖
-					{% endif %}
+			{% endif -%}
+			{% if g.user.is_authenticated() -%}
+				<td class='release-entry-cell release-entry-left-clickable'>
+					{% if entry.include -%}
+						<center><i class="glyphicon glyphicon-option-vertical"></i></center>
+					{% else -%}
+						<center><i class="glyphicon glyphicon-option-vertical-open"></i></center>
+					{% endif -%}
 				</td>
-			{% endif %}
+			{% endif -%}
 		</tr>
-	{% endfor %}
+	{% endfor -%}
 	{{ tableFooter() }}
-{% else: %}
+{% else: -%}
 	<strong>No releases found!</strong>
-{% endif %}
+{% endif -%}
 
 

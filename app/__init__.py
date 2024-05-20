@@ -1,20 +1,33 @@
 import os
+import urllib.parse
+import sys
+import warnings
+
 from flask import Flask
 from flask.json import JSONEncoder
-from flask.ext.sqlalchemy import SQLAlchemy
-from flask.ext.login import LoginManager
-from flask.ext.mail import Mail
-from flask.ext.babel import Babel, lazy_gettext
-from flask_wtf.csrf import CsrfProtect
+from flask_sqlalchemy import SQLAlchemy
+from flask_login import LoginManager
+from flask_mail import Mail
+from flask_babel import Babel, lazy_gettext
+from flask_wtf.csrf import CSRFProtect
 from flask_debugtoolbar import DebugToolbarExtension
 from config import basedir
 import datetime
 from babel.dates import format_datetime
-from flask.ext.assets import Bundle, Environment
+from babel.dates import get_timezone
+from flask_assets import Bundle
+from flask_assets import Environment
+# from flask_sessionstore import Session
+from .sub_views import captcha
 
-import urllib.parse
 
 class AnonUser():
+	def __init__(self):
+		self.id = None
+
+		if "db_migrate.py" in sys.argv:
+			self.id = 2
+
 	def is_authenticated(self):
 		return False
 	def is_active(self):
@@ -28,11 +41,9 @@ class AnonUser():
 	def get_id(self):
 		return None
 
-
-
+# This needs more plugins.
 app = Flask(__name__, static_folder='static', static_url_path='/static')
 
-import sys
 if "debug" in sys.argv:
 	print("Flask running in debug mode!")
 	app.debug = True
@@ -43,10 +54,14 @@ lm = LoginManager()
 lm.anonymous_user = AnonUser
 lm.init_app(app)
 lm.login_view = 'login'
-lm.login_message = lazy_gettext('Please log in to access this page.')
+lm.login_message = 'Please log in to access this page.'
 mail = Mail(app)
 babel = Babel(app)
-csrf = CsrfProtect(app)
+csrf = CSRFProtect(app)
+# Session(app)
+
+
+captcha = captcha.FlaskSessionCaptcha(app)
 
 if "debug" in sys.argv:
 	print("Installing debug toolbar!")
@@ -70,147 +85,60 @@ if not app.debug:
 # ========================================================
 
 assets = Environment(app)
-assets.url = '/static'
-assets.directory = app.config['ASSETS_DEST']
 
-less = Bundle('less/style.less', filters='less', output='gen/style.css')
-assets.register('all-css', less)
+jerberscript = Bundle(
+		"js/jquery-latest.min.js",
+		"js/bootstrap.min.js",
+		"js/jquery.contextMenu.js",
+		"js/jquery.datetimepicker.js",
+		"js/editable.js",
+		filters='jsmin',
+		output='gen/jerberscript.js'
+	)
+
+assets.register('all_jerberscript', jerberscript)
+
+darkside_css = Bundle(
+	'css/bootstrap_dark.css',
+	filters='cssmin',
+	output='gen/darkside_css.css'
+	)
+
+lightside_css = Bundle(
+	'css/bootstrap_light.css',
+	filters='cssmin',
+	output='gen/lightside_css.css'
+	)
+
+css_common = Bundle(
+	'css/custom.css',
+	'css/jquery.contextMenu.css',
+	'css/jquery.datetimepicker.css',
+	filters='cssmin',
+	output='gen/stylin.css'
+	)
+
+assets.register('darkside_css',  darkside_css)
+assets.register('lightside_css', lightside_css)
+assets.register('most_css',      css_common)
 
 import forum.forum.views as forum
 app.register_blueprint(forum.bp, url_prefix='/forum')
 
 # Admin
-from forum import admin
-admin.attach_admin(app)
+# from forum import admin
+# admin.attach_admin(app)
 
-from flask.ext.markdown import Markdown
-Markdown(app, safe_mode='escape')
+from util import urlify
+from flaskext.markdown import Markdown
+Markdown(app, safe_mode='escape', extensions=[urlify.URLifyExtension()])
 
 # ========================================================
 
 
 from app import views, models
-from .models import Users, Translators
 
-CACHE_SIZE = 5000
-userIdCache = {}
-tlGroupIdCache = {}
-
-@app.context_processor
-def utility_processor():
-	def getUserId(idNo):
-		if idNo in userIdCache:
-			return userIdCache[idNo]
-		user = Users.query.filter_by(id=idNo).one()
-		userIdCache[user.id] = user.nickname
-
-		# Truncate the cache if it's getting too large
-		if len(userIdCache) > CACHE_SIZE:
-			userIdCache.popitem()
-
-		return userIdCache[user.id]
-
-	def getTlGroupId(idNo):
-		if idNo in tlGroupIdCache:
-			return tlGroupIdCache[idNo]
-		group = Translators.query.filter_by(id=idNo).one()
-		tlGroupIdCache[group.id] = group.name
-
-		# Truncate the cache if it's getting too large
-		if len(tlGroupIdCache) > CACHE_SIZE:
-			tlGroupIdCache.popitem()
-
-		return tlGroupIdCache[group.id]
-
-
-	def format_date(value, format='medium'):
-
-		return format_datetime(value, "EE yyyy.MM.dd")
-
-	def date_now():
-		return format_datetime(datetime.datetime.today(), "yyyy/MM/dd, hh:mm:ss")
-
-	def ago(then):
-		now = datetime.datetime.now()
-		delta = now - then
-
-		d = delta.days
-		h, s = divmod(delta.seconds, 3600)
-		m, s = divmod(s, 60)
-		labels = ['d', 'h', 'm', 's']
-		dhms = ['%s %s' % (i, lbl) for i, lbl in zip([d, h, m, s], labels)]
-		for start in range(len(dhms)):
-			if not dhms[start].startswith('0'):
-				break
-		for end in range(len(dhms)-1, -1, -1):
-			if not dhms[end].startswith('0'):
-				break
-		return ', '.join(dhms[start:end+1])
-
-	def terse_ago(then):
-		now = datetime.datetime.now()
-		delta = now - then
-
-		d = delta.days
-		h, s = divmod(delta.seconds, 3600)
-		m, s = divmod(s, 60)
-		labels = ['d', 'h', 'm', 's']
-		dhms = ['%s %s' % (i, lbl) for i, lbl in zip([d, h, m, s], labels)]
-		for start in range(len(dhms)):
-			if not dhms[start].startswith('0'):
-				break
-		# for end in range(len(dhms)-1, -1, -1):
-		# 	if not dhms[end].startswith('0'):
-		# 		break
-		if d > 0:
-			dhms = dhms[:2]
-		elif h > 0:
-			dhms = dhms[1:3]
-		else:
-			dhms = dhms[2:]
-		return ', '.join(dhms)
-
-	def staleness_factor(then):
-		if not then:
-			return ""
-		now = datetime.datetime.now()
-		delta = now - then
-		if delta.days <= 14:
-			return "updating-current"
-		if delta.days <= 45:
-			return "updating-stale"
-		if delta.days > 700000:
-			return "updating-never"
-		return "updating-stalled"
-
-	def build_name_qs(keys, items):
-		return build_qs(keys, items, lambda x: x.name)
-
-	def build_qs(keys, items, accessor=lambda x: x):
-		if isinstance(keys, str):
-			tmp = keys
-			keys = [tmp for x in range(len(items))]
-		args = list(zip(keys, [accessor(item) for item in items]))
-		qs = urllib.parse.urlencode(args)
-		return qs
-
-
-
-
-
-
-
-	return dict(
-			getUserId          = getUserId,
-			getTlGroupId       = getTlGroupId,
-			format_date        = format_date,
-			date_now           = date_now,
-			terse_ago          = terse_ago,
-			ago                = ago,
-			staleness_factor   = staleness_factor,
-			build_query_string = build_qs,
-			build_name_qs      = build_name_qs,
-			)
+from . import context_processors
 
 
 

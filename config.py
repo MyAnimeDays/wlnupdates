@@ -1,4 +1,7 @@
 
+import os
+import sys
+import uuid
 
 from settings import DATABASE_IP            as C_DATABASE_IP
 from settings import DATABASE_DB_NAME       as C_DATABASE_DB_NAME
@@ -6,14 +9,16 @@ from settings import DATABASE_USER          as C_DATABASE_USER
 from settings import DATABASE_PASS          as C_DATABASE_PASS
 from settings import SECRET_KEY             as C_SECRET_KEY
 from settings import WTF_CSRF_SECRET_KEY    as C_WTF_CSRF_SECRET_KEY
+from settings import MAIL_SERVER            as C_MAIL_SERVER
 from settings import MAIL_USERNAME          as C_MAIL_USERNAME
 from settings import MAIL_PASSWORD          as C_MAIL_PASSWORD
 from settings import MAIL_DEFAULT_SENDER    as C_MAIL_DEFAULT_SENDER
 from settings import SECURITY_PASSWORD_SALT as C_SECURITY_PASSWORD_SALT
 from settings import COVER_PATH             as C_COVER_PATH
+from settings import READ_ONLY              as C_READ_ONLY
+from settings import READ_ONLY_MSG          as C_READ_ONLY_MSG
 
-import os
-import sys
+
 if len(sys.argv) > 1 and "debug" in sys.argv:
 	SQLALCHEMY_ECHO = True
 
@@ -25,6 +30,12 @@ class BaseConfig(object):
 	SQLALCHEMY_DATABASE_URI = 'postgresql://{user}:{passwd}@{host}:5432/{database}'.format(user=C_DATABASE_USER, passwd=C_DATABASE_PASS, host=C_DATABASE_IP, database=C_DATABASE_DB_NAME)
 	SQLALCHEMY_MIGRATE_REPO = os.path.join(basedir, 'db_repository')
 
+	# Captcha parameters
+	SECRET_KEY = uuid.uuid4()
+	CAPTCHA_ENABLE = True
+	CAPTCHA_LENGTH = 5
+	SESSION_TYPE   = 'null'
+
 	CSRF_ENABLED = True
 	WTF_CSRF_ENABLED = True
 
@@ -32,7 +43,7 @@ class BaseConfig(object):
 
 
 	# administrator list
-	ADMINS = ['you@example.com']
+	ADMINS = ['admin@wlnupdates.com']
 
 	# slow database query threshold (in seconds)
 	DATABASE_QUERY_TIMEOUT = 0.5
@@ -57,7 +68,7 @@ class BaseConfig(object):
 	SECURITY_PASSWORD_SALT = C_SECURITY_PASSWORD_SALT
 
 	# mail settings
-	MAIL_SERVER = 'smtp.googlemail.com'
+	MAIL_SERVER = C_MAIL_SERVER
 	MAIL_PORT = 465
 	MAIL_USE_TLS = False
 	MAIL_USE_SSL = True
@@ -69,7 +80,8 @@ class BaseConfig(object):
 	ADMIN_USERID  = 2
 	SYSTEM_USERID = 1
 
+	SQLALCHEMY_TRACK_MODIFICATIONS = False
 
-	# flask-assets
-	# ------------
-	ASSETS_DEST = 'app/static'
+	READ_ONLY     = C_READ_ONLY
+	READ_ONLY_MSG = C_READ_ONLY_MSG
+

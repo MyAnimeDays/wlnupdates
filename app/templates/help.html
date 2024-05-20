@@ -1,8 +1,10 @@
 <!-- extend base layout -->
-{% extends "__base.html" %}
+{% extends "__base.html" -%}
 
-{% block content %}
-	{% include '_block_flash.html' %}
+{% set title = "Site Help" -%}
+
+{% block content -%}
+	{% include '_block_flash.html' -%}
 	<div class="well">
 		<h4>Site Help</h4>
 		<h3>FAQ</h3>
@@ -44,8 +46,7 @@
 					and a way to fix it is planned.
 				</p>
 			</li>
-			<li>
-				<a name="add-my-own-fiction"></a>
+			<li id="add-my-own-fiction">
 				<strong>Can I add a series I'm writing?</strong>
 				<p>
 					In general, <strong>sure</strong>! This site seeks to be as encyclopedic as possible for
@@ -79,8 +80,7 @@
 				</p>
 			</li>
 
-			<li>
-				<a name="what-is-oel"></a>
+			<li id="what-is-oel">
 				<strong>What does "OEL" mean?</strong>
 				<p>
 					<strong>OEL</strong> stands for <em>"Original English Language"</em>. In the context of this
@@ -124,8 +124,7 @@
 
 		<span><h3>IAQ</h3><sup style='float:right'>Infrequently asked questions</sup></span>
 		<ul>
-			<li>
-				<a name="auto-release-requirements"></a>
+			<li id="auto-release-requirements">
 				<strong>Your project is somewhat neat. Can you add releases from my site?</strong>
 				<p>
 					Absolutely, but there are a few things you have to do.
@@ -165,6 +164,18 @@
 					under the nick <code>fake-name</code>.
 				</p>
 			</li>
+
+			<li id="similar-series">
+				<strong>The "Similar Series" list doesn't seem to work properly:</strong>
+				<p>
+					The similar series list on each series page is calculated by looking up the series with the most tags
+					in common. If a series doesn't have any tags or it has only generic tags, the similar series output will
+					be incoherent or seemingly random.
+				</p>
+				<p>
+					If this bothers you, <i>add more tags!</i> Newly added tags will immediately improve the similar series search.
+				</p>
+			</li>
 			<li>
 				<strong>The name you have for my group/site is wrong:</strong>
 				<p>
@@ -195,4 +206,4 @@
 		</ul>
 	</div>
 
-{% endblock %}
+{% endblock -%}

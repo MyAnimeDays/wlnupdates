@@ -2,7 +2,7 @@ from flask import render_template
 from flask import flash
 from flask import redirect
 from flask import url_for
-from flask.ext.babel import gettext
+from flask_babel import gettext
 # from guess_language import guess_language
 from app import app
 from app.models import Releases
@@ -30,6 +30,10 @@ def get_releases(page, srctype=None):
 @app.route('/releases/')
 def renderReleasesTable(page=1):
 
+	if page > 50:
+		flash('Historical pages limited to 50 for performance reasons!')
+		page = 1
+
 	releases = get_releases(page=page)
 
 	return render_template('releases.html',
@@ -46,6 +50,10 @@ def renderReleasesTable(page=1):
 @app.route('/translated-releases/')
 def renderTranslatedReleasesTable(page=1):
 
+	if page > 50:
+		flash('Historical pages limited to 50 for performance reasons!')
+		page = 1
+
 	releases = get_releases(page=page, srctype='translated')
 
 	return render_template('releases.html',
@@ -60,6 +68,10 @@ def renderTranslatedReleasesTable(page=1):
 @app.route('/oel-releases/<int:page>')
 @app.route('/oel-releases/')
 def renderOelReleasesTable(page=1):
+
+	if page > 50:
+		flash('Historical pages limited to 50 for performance reasons!')
+		page = 1
 
 	releases = get_releases(page=page, srctype='oel')
 
